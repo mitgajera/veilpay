@@ -5,7 +5,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import idl from "../idl/veilpay.json";
 
 
-let deploymentConfig = { programId: "5vKU63aqbKn5F4NWMnaMoq1jjSVSR8DNCFbfJnc4fPUZ" }; // Default/Fallback
+let deploymentConfig = { programId: "6pYu5mRNehST4KkwUzcEKt47Km9qNAvmCtdRtTjEanDG" }; // Default/Fallback
 try {
     // @ts-ignore
     deploymentConfig = require("../idl/deployment.json");
