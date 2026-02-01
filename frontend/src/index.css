@@ -1,0 +1,82 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-app: #ffe4e6;
+  /* Soft Pink */
+  --text-primary: #881337;
+  /* Rose-900 */
+  --text-secondary: #9f1239;
+  /* Rose-700 */
+  --accent-primary: #e11d48;
+  /* Rose-600 */
+  --accent-secondary: #f43f5e;
+  /* Rose-500 */
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(225, 29, 72, 0.1);
+  --inner-card-bg: rgba(255, 241, 242, 0.8);
+  /* Rose-50 */
+  --input-bg: #fff1f2;
+}
+
+body {
+  margin: 0;
+  font-family: 'Outfit', sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  /* User Wallpaper */
+  background-image: url('/wallpaper.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  overflow-x: hidden;
+}
+
+@layer components {
+  .btn-primary {
+    @apply w-full bg-rose-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition-all duration-200 ease-in-out transform hover:-translate-y-1 hover:shadow-xl hover:bg-rose-700 active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply w-full bg-transparent border-2 border-rose-200 text-rose-700 font-bold py-3 px-6 rounded-xl transition-all duration-200 ease-in-out hover:bg-rose-50 hover:border-rose-300 active:transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .input-primary {
+    @apply w-full bg-white/80 border border-rose-200 text-rose-900 placeholder-rose-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-transparent transition-all duration-200 font-medium;
+  }
+
+  .inner-card {
+    @apply bg-white/50 backdrop-blur-sm p-4 rounded-xl border border-rose-100/50 shadow-sm;
+  }
+}
+
+/* Wallet Adapter Customization */
+.wallet-adapter-button {
+  background-color: white !important;
+  color: var(--text-primary) !important;
+  font-family: 'Outfit', sans-serif !important;
+  font-weight: 600 !important;
+  border: 1px solid rgba(0, 0, 0, 0.1) !important;
+  border-radius: 12px !important;
+}
+
+.wallet-adapter-button:hover {
+  background-color: #fff1f2 !important;
+}
+
+.wallet-adapter-modal-wrapper {
+  background: #fff !important;
+}
+
+.wallet-adapter-modal-title {
+  color: #333 !important;
+}
+
+.wallet-adapter-modal-list .wallet-adapter-button {
+  background: transparent !important;
+}
