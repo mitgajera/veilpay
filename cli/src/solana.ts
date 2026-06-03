@@ -38,9 +38,12 @@ export function getProgram() {
   return { program, provider, keypair, connection };
 }
 
-export function getMintConfigPda(programId: PublicKey): [PublicKey, number] {
+export function getMintConfigPda(
+  programId: PublicKey,
+  mintAddress: PublicKey
+): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("mint_config")],
+    [Buffer.from("mint_config"), mintAddress.toBuffer()],
     programId
   );
 }

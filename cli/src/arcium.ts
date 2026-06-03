@@ -7,7 +7,7 @@
 // Encrypt an amount into a 64-byte ciphertext (stub)
 export function encryptAmount(amount: number): Buffer {
   const buf = Buffer.alloc(64, 0);
-  buf.writeBigUInt64LE(BigInt(amount), 0);
+  buf.writeBigUInt64LE(BigInt(Math.round(amount * 1e9)), 0);
   return buf;
 }
 
