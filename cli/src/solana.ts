@@ -6,11 +6,24 @@ import * as os from "os";
 
 const PROGRAM_ID = new PublicKey("6QPCy4uju8fKdzje3vkifX6YH6sRZ9ZuzyhdMjb25cGa");
 
+function readCliConfig(): { rpc?: string; wallet?: string } {
+  try {
+    const cfgPath = path.join(os.homedir(), ".veilpay", "config.json");
+    return JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
 export function getProvider() {
+  const cfg = readCliConfig();
   const rpcUrl =
-    process.env.ANCHOR_PROVIDER_URL || "https://api.devnet.solana.com";
+    process.env.ANCHOR_PROVIDER_URL ||
+    cfg.rpc ||
+    "https://api.devnet.solana.com";
   const walletPath =
     process.env.ANCHOR_WALLET ||
+    cfg.wallet ||
     path.join(os.homedir(), ".config", "solana", "id.json");
 
   const keyData = JSON.parse(fs.readFileSync(walletPath, "utf-8"));

@@ -9,6 +9,11 @@ import { balanceCmd } from "./commands/balance";
 import { activityCmd } from "./commands/activity";
 import { mintTokensCmd } from "./commands/mint-tokens";
 import { initUsdcCmd } from "./commands/init-usdc";
+import { wrapSolCmd } from "./commands/wrap-sol";
+import { closeCmd } from "./commands/close";
+import { batchSendCmd } from "./commands/batch-send";
+import { configCmd } from "./commands/config";
+import { infoCmd } from "./commands/info";
 
 const cli = new Command();
 
@@ -27,6 +32,11 @@ cli.addCommand(balanceCmd());
 cli.addCommand(activityCmd());
 cli.addCommand(mintTokensCmd());
 cli.addCommand(initUsdcCmd());
+cli.addCommand(wrapSolCmd());
+cli.addCommand(closeCmd());
+cli.addCommand(batchSendCmd());
+cli.addCommand(configCmd());
+cli.addCommand(infoCmd());
 
 cli.parseAsync(process.argv).catch((err) => {
   console.error("Error:", err.message ?? err);
