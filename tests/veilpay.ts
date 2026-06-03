@@ -88,11 +88,11 @@ describe("VeilPay", () => {
     await airdrop(closer.publicKey);
     await airdrop(depositor.publicKey, 3);
 
+    mintKeypair = Keypair.generate();
     [mintConfigPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("mint_config")],
+      [Buffer.from("mint_config"), mintKeypair.publicKey.toBuffer()],
       program.programId
     );
-    mintKeypair = Keypair.generate();
 
     [vaultPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), mintConfigPda.toBuffer()],
@@ -793,6 +793,7 @@ describe("VeilPay", () => {
           ownerTokenAccount: depositorAta,
           vault: vaultPda,
           mintConfig: mintConfigPda,
+          mint: mintKeypair.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
