@@ -18,6 +18,10 @@ pub mod veilpay {
         instructions::initialize_mint::handler(ctx)
     }
 
+    pub fn initialize_existing_mint(ctx: Context<InitializeExistingMint>) -> Result<()> {
+        instructions::initialize_existing_mint::handler(ctx)
+    }
+
     pub fn init_balance(
         ctx: Context<InitBalance>,
         owner_commitment: [u8; 32],

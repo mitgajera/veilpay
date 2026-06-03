@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 use crate::errors::VeilPayError;
 use crate::events::WithdrawalMade;
@@ -38,10 +38,13 @@ pub struct Withdraw<'info> {
 
     #[account(
         mut,
-        seeds = [b"mint_config"],
+        seeds = [b"mint_config", mint.key().as_ref()],
         bump = mint_config.bump,
     )]
     pub mint_config: Account<'info, MintConfig>,
+
+    #[account(constraint = mint.key() == mint_config.mint @ VeilPayError::InvalidMint)]
+    pub mint: Account<'info, Mint>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -67,8 +70,9 @@ pub fn handler(
         VeilPayError::InvalidWithdrawalProof
     );
 
+    let mint_key = ctx.accounts.mint_config.mint;
     let mint_config_bump = ctx.accounts.mint_config.bump;
-    let seeds = &[b"mint_config".as_ref(), &[mint_config_bump]];
+    let seeds = &[b"mint_config".as_ref(), mint_key.as_ref(), &[mint_config_bump]];
     let signer = &[&seeds[..]];
 
     let cpi_ctx = CpiContext::new_with_signer(
