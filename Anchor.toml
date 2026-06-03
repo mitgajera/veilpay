@@ -6,16 +6,16 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-veilpay = "6pYu5mRNehST4KkwUzcEKt47Km9qNAvmCtdRtTjEanDG"
+veilpay = "6QPCy4uju8fKdzje3vkifX6YH6sRZ9ZuzyhdMjb25cGa"
 
 [programs.localnet]
-veilpay = "6pYu5mRNehST4KkwUzcEKt47Km9qNAvmCtdRtTjEanDG"
+veilpay = "6QPCy4uju8fKdzje3vkifX6YH6sRZ9ZuzyhdMjb25cGa"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
