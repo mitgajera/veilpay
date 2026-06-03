@@ -1,5 +1,5 @@
-pub mod veilpay_mint;
 pub mod confidential_balance;
+pub mod mint_config;
 
-pub use veilpay_mint::*;
 pub use confidential_balance::*;
+pub use mint_config::*;

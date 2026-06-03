@@ -1,2 +1,5 @@
-pub mod helpers;
-pub mod crypto;
+pub mod commitment;
+pub mod encryption;
+
+pub use commitment::*;
+pub use encryption::*;
