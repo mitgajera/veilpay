@@ -158,7 +158,7 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    expect(cipher.decrypt([e.newBalance], e.nonce)[0]).to.equal(BigInt(70));
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(70));
   });
 
   it("debit: overdraft (20 - 50) leaves 20 unchanged", async () => {
@@ -176,7 +176,7 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    expect(cipher.decrypt([e.newBalance], e.nonce)[0]).to.equal(BigInt(20));
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(20));
   });
 
   // deposit
@@ -197,7 +197,7 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    expect(cipher.decrypt([e.newBalance], e.nonce)[0]).to.equal(BigInt(80));
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(80));
   });
 
   // withdraw
@@ -218,7 +218,7 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    expect(cipher.decrypt([e.newBalance], e.nonce)[0]).to.equal(BigInt(60));
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(60));
   });
 
   // transfer
@@ -239,7 +239,10 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    const dec = cipher.decrypt([e.newSenderBalance, e.newReceiverBalance], e.nonce);
+    const dec = cipher.decrypt(
+      [e.newSenderBalance, e.newReceiverBalance],
+      Uint8Array.from(e.nonce),
+    );
     expect(dec[0]).to.equal(BigInt(70));
     expect(dec[1]).to.equal(BigInt(80));
   });
@@ -262,7 +265,7 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    expect(cipher.decrypt([e.balance], e.nonce)[0]).to.equal(BigInt(42));
+    expect(cipher.decrypt([e.balance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(42));
   });
 
   // prove_threshold
@@ -323,7 +326,7 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    expect(auditorCipher.decrypt([e.balance], e.nonce)[0]).to.equal(BigInt(77));
+    expect(auditorCipher.decrypt([e.balance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(77));
   });
 
   // batch_transfer
@@ -352,7 +355,10 @@ describe("Veilpay", () => {
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
     const e = await ev;
-    const dec = cipher.decrypt([e.newSender, e.newR1, e.newR2, e.newR3], e.nonce);
+    const dec = cipher.decrypt(
+      [e.newSender, e.newR1, e.newR2, e.newR3],
+      Uint8Array.from(e.nonce),
+    );
     expect(dec[0]).to.equal(BigInt(70)); // 100 - 30
     expect(dec[1]).to.equal(BigInt(15)); // 10 + 5
     expect(dec[2]).to.equal(BigInt(30)); // 20 + 10
