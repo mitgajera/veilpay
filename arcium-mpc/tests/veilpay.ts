@@ -49,7 +49,7 @@ describe("Veilpay", () => {
   const clusterAccount = getClusterAccAddress(arciumEnv.arciumClusterOffset);
   const owner = readKpJson(`${os.homedir()}/.config/solana/id.json`);
 
-  // ── helpers ─────────────────────────────────────────────────────────
+  // helpers
 
   // Register a circuit's computation definition + upload its compiled bytecode.
   async function initCompDef(
@@ -66,20 +66,31 @@ describe("Veilpay", () => {
       getArciumProgramId(),
     )[0];
 
-    const mxeAccount = getMXEAccAddress(program.programId);
-    const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
-    const lutAddress = getLookupTableAddress(program.programId, mxeAcc.lutOffsetSlot);
+    // On a persistent chain (devnet) the comp def account may already exist from
+    // a prior (possibly interrupted) run. Skip re-init if so (it fails with
+    // "account already in use"), but ALWAYS run the circuit upload below — a
+    // half-uploaded comp def causes error 6300 (ComputationDefinitionNotCompleted)
+    // at compute time, so re-uploading finalizes it. Localnet starts fresh each
+    // run, so init always runs there.
+    const existing = await provider.connection.getAccountInfo(compDefPDA);
+    if (!existing) {
+      const mxeAccount = getMXEAccAddress(program.programId);
+      const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
+      const lutAddress = getLookupTableAddress(program.programId, mxeAcc.lutOffsetSlot);
 
-    await (program.methods as any)
-      [initMethod]()
-      .accounts({
-        compDefAccount: compDefPDA,
-        payer: owner.publicKey,
-        mxeAccount,
-        addressLookupTable: lutAddress,
-      })
-      .signers([owner])
-      .rpc({ commitment: "confirmed" });
+      await (program.methods as any)
+        [initMethod]()
+        .accounts({
+          compDefAccount: compDefPDA,
+          payer: owner.publicKey,
+          mxeAccount,
+          addressLookupTable: lutAddress,
+        })
+        .signers([owner])
+        .rpc({ commitment: "confirmed" });
+    } else {
+      console.log(`comp def "${circuitName}" exists — skipping init, ensuring circuit upload`);
+    }
 
     const rawCircuit = fs.readFileSync(`build/${circuitName}.arcis`);
     await uploadCircuit(
@@ -129,7 +140,7 @@ describe("Veilpay", () => {
     console.log("MXE x25519 pubkey:", Buffer.from(mxePublicKey).toString("hex"));
   });
 
-  // ── debit ───────────────────────────────────────────────────────────
+  // debit
 
   it("debit: 100 - 30 = 70", async () => {
     await initCompDef("debit", "initDebitCompDef");
@@ -168,7 +179,7 @@ describe("Veilpay", () => {
     expect(cipher.decrypt([e.newBalance], e.nonce)[0]).to.equal(BigInt(20));
   });
 
-  // ── deposit ─────────────────────────────────────────────────────────
+  // deposit
 
   it("deposit: 50 + 30 = 80", async () => {
     await initCompDef("deposit", "initDepositCompDef");
@@ -189,7 +200,7 @@ describe("Veilpay", () => {
     expect(cipher.decrypt([e.newBalance], e.nonce)[0]).to.equal(BigInt(80));
   });
 
-  // ── withdraw ────────────────────────────────────────────────────────
+  // withdraw
 
   it("withdraw: 100 - 40 = 60", async () => {
     await initCompDef("withdraw", "initWithdrawCompDef");
@@ -210,7 +221,7 @@ describe("Veilpay", () => {
     expect(cipher.decrypt([e.newBalance], e.nonce)[0]).to.equal(BigInt(60));
   });
 
-  // ── transfer ────────────────────────────────────────────────────────
+  // transfer
 
   it("transfer: sender 100 -> receiver 50, amount 30 => 70 / 80", async () => {
     await initCompDef("transfer", "initTransferCompDef");
@@ -233,7 +244,7 @@ describe("Veilpay", () => {
     expect(dec[1]).to.equal(BigInt(80));
   });
 
-  // ── view_balance (Feature 1) ────────────────────────────────────────
+  // view_balance
 
   it("view_balance: re-encrypts 42 back to the owner", async () => {
     await initCompDef("view_balance", "initViewBalanceCompDef");
@@ -254,7 +265,7 @@ describe("Veilpay", () => {
     expect(cipher.decrypt([e.balance], e.nonce)[0]).to.equal(BigInt(42));
   });
 
-  // ── prove_threshold (Feature 4a) ────────────────────────────────────
+  // prove_threshold
 
   it("prove_threshold: 100 >= 50 => true", async () => {
     await initCompDef("prove_threshold", "initProveThresholdCompDef");
@@ -293,7 +304,7 @@ describe("Veilpay", () => {
     expect(e.meetsThreshold).to.equal(false);
   });
 
-  // ── reveal_to_auditor (Feature 4b) ──────────────────────────────────
+  // reveal_to_auditor
 
   it("reveal_to_auditor: discloses 77 only to the auditor key", async () => {
     await initCompDef("reveal_to_auditor", "initRevealToAuditorCompDef");
@@ -315,7 +326,7 @@ describe("Veilpay", () => {
     expect(auditorCipher.decrypt([e.balance], e.nonce)[0]).to.equal(BigInt(77));
   });
 
-  // ── batch_transfer (Feature 3) ──────────────────────────────────────
+  // batch_transfer
 
   it("batch_transfer: sender 100 -> [r1=10,r2=20,r3=30] amts [5,10,15]", async () => {
     await initCompDef("batch_transfer", "initBatchTransferCompDef");
@@ -348,7 +359,7 @@ describe("Veilpay", () => {
     expect(dec[3]).to.equal(BigInt(45)); // 30 + 15
   });
 
-  // ── Stage 3: persistent on-chain Enc<Mxe> balance ───────────────────
+  // Stage 3: persistent on-chain Enc<Mxe> balance
 
   it("persists an on-chain balance: init 0 -> +100 -> +50 -> reveal 150", async () => {
     await initCompDef("init_balance", "initInitBalanceCompDef");

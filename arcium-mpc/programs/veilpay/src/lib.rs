@@ -18,7 +18,7 @@ pub mod veilpay {
     use super::*;
     use arcium_client::idl::arcium::types::CallbackAccount;
 
-    // ── debit ─────────────────────────────────────────────────────────
+    // debit
 
     /// One-time: register the `debit` circuit definition with the MXE.
     pub fn init_debit_comp_def(ctx: Context<InitDebitCompDef>) -> Result<()> {
@@ -78,7 +78,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── transfer ──────────────────────────────────────────────────────
+    // transfer
 
     /// One-time: register the `transfer` circuit definition with the MXE.
     pub fn init_transfer_comp_def(ctx: Context<InitTransferCompDef>) -> Result<()> {
@@ -141,7 +141,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── deposit ───────────────────────────────────────────────────────
+    // deposit
 
     /// One-time: register the `deposit` circuit definition with the MXE.
     pub fn init_deposit_comp_def(ctx: Context<InitDepositCompDef>) -> Result<()> {
@@ -201,7 +201,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── withdraw ──────────────────────────────────────────────────────
+    // withdraw
 
     /// One-time: register the `withdraw` circuit definition with the MXE.
     pub fn init_withdraw_comp_def(ctx: Context<InitWithdrawCompDef>) -> Result<()> {
@@ -262,7 +262,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── view_balance (Feature 1) ──────────────────────────────────────
+    // view_balance
 
     pub fn init_view_balance_comp_def(ctx: Context<InitViewBalanceCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
@@ -318,7 +318,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── prove_threshold (Feature 4a) ──────────────────────────────────
+    // prove_threshold
 
     pub fn init_prove_threshold_comp_def(ctx: Context<InitProveThresholdCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
@@ -376,7 +376,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── reveal_to_auditor (Feature 4b) ────────────────────────────────
+    // reveal_to_auditor
 
     pub fn init_reveal_to_auditor_comp_def(
         ctx: Context<InitRevealToAuditorCompDef>,
@@ -434,7 +434,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── batch_transfer (Feature 3) ────────────────────────────────────
+    // batch_transfer
 
     pub fn init_batch_transfer_comp_def(ctx: Context<InitBatchTransferCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
@@ -506,7 +506,7 @@ pub mod veilpay {
         Ok(())
     }
 
-    // ── Stage 3: persistent MXE-owned balances ────────────────────────
+    // Stage 3: persistent MXE-owned balances
 
     pub fn init_init_balance_comp_def(ctx: Context<InitInitBalanceCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;

@@ -1,0 +1,34 @@
+// VeilPay Arcium MPC — Zed tasks.
+// These MUST run inside WSL (Arcium toolchain is Linux-only). Open this folder
+// with the command palette action `projects: open in wsl` first, then run a task
+// via `task: spawn`. Docker Desktop must be running before any arcium task.
+[
+  {
+    "label": "Arcium: full test (fresh ledger)",
+    "command": "export PATH=\"$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH\"; pkill -9 -f '[s]olana-test-validator'; docker rm -f $(docker ps -aq) 2>/dev/null; rm -rf ~/veilpay-ledger && mkdir -p ~/veilpay-ledger .anchor && ln -sfn ~/veilpay-ledger .anchor/test-ledger; mkdir -p artifacts && curl -sL https://bin.arcium.com/download/arcium_program_0.10.4.so -o artifacts/arcium_program_0.10.4.so; arcium test --skip-build",
+    "use_new_terminal": false,
+    "reveal": "always",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Arcium: fast re-run (reuse MXE keys)",
+    "command": "export PATH=\"$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH\"; pkill -9 -f '[s]olana-test-validator'; docker rm -f $(docker ps -aq) 2>/dev/null; rm -rf ~/veilpay-ledger && mkdir -p ~/veilpay-ledger .anchor && ln -sfn ~/veilpay-ledger .anchor/test-ledger; mkdir -p artifacts && curl -sL https://bin.arcium.com/download/arcium_program_0.10.4.so -o artifacts/arcium_program_0.10.4.so; arcium test --skip-build --skip-clean-accounts --skip-keygen",
+    "use_new_terminal": false,
+    "reveal": "always",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Arcium: build circuits (then restore .so)",
+    "command": "export PATH=\"$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH\"; arcium build; mkdir -p artifacts && curl -sL https://bin.arcium.com/download/arcium_program_0.10.4.so -o artifacts/arcium_program_0.10.4.so && echo 'build done, arcium .so restored'",
+    "use_new_terminal": false,
+    "reveal": "always",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Arcium: restore .so + ledger symlink only",
+    "command": "rm -rf .anchor/test-ledger; mkdir -p ~/veilpay-ledger .anchor && ln -sfn ~/veilpay-ledger .anchor/test-ledger; mkdir -p artifacts && curl -sL https://bin.arcium.com/download/arcium_program_0.10.4.so -o artifacts/arcium_program_0.10.4.so && echo 'ledger symlinked + arcium .so restored'",
+    "use_new_terminal": false,
+    "reveal": "always",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]

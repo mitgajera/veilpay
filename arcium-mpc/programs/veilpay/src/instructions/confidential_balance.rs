@@ -8,7 +8,7 @@ use crate::constants::{
 };
 use crate::state::ConfidentialBalance;
 
-// ── init_balance ──────────────────────────────────────────────────────
+// init_balance
 
 #[queue_computation_accounts("init_balance", payer)]
 #[derive(Accounts)]
@@ -99,7 +99,7 @@ pub struct InitInitBalanceCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// ── deposit_to_account ────────────────────────────────────────────────
+// deposit_to_account
 
 #[queue_computation_accounts("deposit_to_account", payer)]
 #[derive(Accounts)]
@@ -187,7 +187,7 @@ pub struct InitDepositToAccountCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// ── reveal_account_balance ────────────────────────────────────────────
+// reveal_account_balance
 
 #[queue_computation_accounts("reveal_account_balance", payer)]
 #[derive(Accounts)]

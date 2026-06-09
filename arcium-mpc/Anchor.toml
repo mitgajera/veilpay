@@ -9,11 +9,14 @@ skip-lint = false
 [programs.localnet]
 veilpay = "nf3B37iqKjktMxUQnShsaDgF1EReTf4oe8HD6XqcjJW"
 
+[programs.devnet]
+veilpay = "nf3B37iqKjktMxUQnShsaDgF1EReTf4oe8HD6XqcjJW"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
