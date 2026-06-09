@@ -17,5 +17,11 @@
     "@types/mocha": "^9.0.0",
     "typescript": "^5.7.3",
     "prettier": "^2.6.2"
+  },
+  "overrides": {
+    "rpc-websockets": "9.3.8"
+  },
+  "resolutions": {
+    "rpc-websockets": "9.3.8"
   }
 }
