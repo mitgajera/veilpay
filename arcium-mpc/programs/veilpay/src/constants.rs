@@ -13,5 +13,7 @@ pub const COMP_DEF_OFFSET_BATCH_TRANSFER: u32 = comp_def_offset("batch_transfer"
 pub const COMP_DEF_OFFSET_INIT_BALANCE: u32 = comp_def_offset("init_balance");
 pub const COMP_DEF_OFFSET_DEPOSIT_TO_ACCOUNT: u32 = comp_def_offset("deposit_to_account");
 pub const COMP_DEF_OFFSET_DEBIT_FROM_ACCOUNT: u32 = comp_def_offset("debit_from_account");
+pub const COMP_DEF_OFFSET_TRANSFER_BETWEEN_ACCOUNTS: u32 =
+    comp_def_offset("transfer_between_accounts");
 pub const COMP_DEF_OFFSET_REVEAL_ACCOUNT_BALANCE: u32 =
     comp_def_offset("reveal_account_balance");

@@ -726,6 +726,91 @@ pub mod veilpay {
         Ok(())
     }
 
+    pub fn init_transfer_between_accounts_comp_def(
+        ctx: Context<InitTransferBetweenAccountsCompDef>,
+    ) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    /// Confidential transfer from the signer's balance to the receiver's balance.
+    /// Both balances are read from on-chain ciphertext (offset 9) so neither can
+    /// be faked; the MPC enforces no-overdraft. The callback writes both new
+    /// ciphertexts back.
+    pub fn transfer_between_accounts(
+        ctx: Context<TransferBetweenAccounts>,
+        computation_offset: u64,
+        ciphertext_amount: [u8; 32],
+        pubkey: [u8; 32],
+        amount_nonce: u128,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+        let args = ArgBuilder::new()
+            // Enc<Shared, u64> amount (from client)
+            .x25519_pubkey(pubkey)
+            .plaintext_u128(amount_nonce)
+            .encrypted_u64(ciphertext_amount)
+            // Enc<Mxe, u64> sender balance (read from account)
+            .plaintext_u128(ctx.accounts.sender_balance.nonce)
+            .account(ctx.accounts.sender_balance.key(), 8 + 1, 32)
+            // Enc<Mxe, u64> receiver balance (read from account)
+            .plaintext_u128(ctx.accounts.receiver_balance.nonce)
+            .account(ctx.accounts.receiver_balance.key(), 8 + 1, 32)
+            .build();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            vec![TransferBetweenAccountsCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[
+                    CallbackAccount {
+                        pubkey: ctx.accounts.sender_balance.key(),
+                        is_writable: true,
+                    },
+                    CallbackAccount {
+                        pubkey: ctx.accounts.receiver_balance.key(),
+                        is_writable: true,
+                    },
+                ],
+            )?],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "transfer_between_accounts")]
+    pub fn transfer_between_accounts_callback(
+        ctx: Context<TransferBetweenAccountsCallback>,
+        output: SignedComputationOutputs<TransferBetweenAccountsOutput>,
+    ) -> Result<()> {
+        // The tuple return `(Enc<Mxe,u64>, Enc<Mxe,u64>)` arrives as a single
+        // `field_0` struct whose fields are `field_0` (new_sender) and `field_1`
+        // (new_receiver), each an Enc output with `.ciphertexts` and `.nonce`.
+        let pair = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(TransferBetweenAccountsOutput { field_0 }) => field_0,
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
+        };
+
+        let sender = &mut ctx.accounts.sender_balance;
+        sender.encrypted_balance = pair.field_0.ciphertexts;
+        sender.nonce = pair.field_0.nonce;
+        let receiver = &mut ctx.accounts.receiver_balance;
+        receiver.encrypted_balance = pair.field_1.ciphertexts;
+        receiver.nonce = pair.field_1.nonce;
+        Ok(())
+    }
+
     pub fn init_reveal_account_balance_comp_def(
         ctx: Context<InitRevealAccountBalanceCompDef>,
     ) -> Result<()> {

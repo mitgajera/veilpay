@@ -53,6 +53,30 @@ mod circuits {
         balance_ctxt.owner.from_arcis(new_balance)
     }
 
+    /// Confidential transfer between two stored MXE-owned balances: debit the
+    /// sender (no-overdraft) and credit the receiver (saturating). Both balances
+    /// are read from on-chain ciphertext, so neither side can be faked. Nothing
+    /// moves if the sender is short. Returns (new_sender, new_receiver).
+    #[instruction]
+    pub fn transfer_between_accounts(
+        amount_ctxt: Enc<Shared, u64>,
+        sender_ctxt: Enc<Mxe, u64>,
+        receiver_ctxt: Enc<Mxe, u64>,
+    ) -> (Enc<Mxe, u64>, Enc<Mxe, u64>) {
+        let amount = amount_ctxt.to_arcis();
+        let sender = sender_ctxt.to_arcis();
+        let receiver = receiver_ctxt.to_arcis();
+        let sufficient = sender >= amount;
+        let moved = if sufficient { amount } else { 0 };
+        let new_sender = sender - moved;
+        let recv_sum = receiver + moved;
+        let new_receiver = if recv_sum < receiver { u64::MAX } else { recv_sum };
+        (
+            sender_ctxt.owner.from_arcis(new_sender),
+            receiver_ctxt.owner.from_arcis(new_receiver),
+        )
+    }
+
     /// Reveal the stored MXE-owned balance (verification/testing).
     #[instruction]
     pub fn reveal_account_balance(balance_ctxt: Enc<Mxe, u64>) -> u64 {

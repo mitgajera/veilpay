@@ -5,6 +5,7 @@ use crate::{ArciumSignerAccount, ID, ID_CONST};
 use crate::constants::{
     COMP_DEF_OFFSET_DEBIT_FROM_ACCOUNT, COMP_DEF_OFFSET_DEPOSIT_TO_ACCOUNT,
     COMP_DEF_OFFSET_INIT_BALANCE, COMP_DEF_OFFSET_REVEAL_ACCOUNT_BALANCE,
+    COMP_DEF_OFFSET_TRANSFER_BETWEEN_ACCOUNTS,
 };
 use crate::state::ConfidentialBalance;
 
@@ -258,6 +259,105 @@ pub struct DebitFromAccountCallback<'info> {
 #[init_computation_definition_accounts("debit_from_account", payer)]
 #[derive(Accounts)]
 pub struct InitDebitFromAccountCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program. Not initialized yet.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+// transfer_between_accounts
+
+#[queue_computation_accounts("transfer_between_accounts", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct TransferBetweenAccounts<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: only used to key the PDAs.
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: the receiver; only used to key the receiver balance PDA.
+    pub receiver: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        seeds = [b"balance", payer.key().as_ref(), mint.key().as_ref()],
+        bump = sender_balance.bump,
+    )]
+    pub sender_balance: Account<'info, ConfidentialBalance>,
+    #[account(
+        mut,
+        seeds = [b"balance", receiver.key().as_ref(), mint.key().as_ref()],
+        bump = receiver_balance.bump,
+    )]
+    pub receiver_balance: Account<'info, ConfidentialBalance>,
+    #[account(
+        init_if_needed,
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
+        bump,
+        address = derive_sign_pda!(),
+    )]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: mempool_account, checked by the arcium program.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: executing_pool, checked by the arcium program.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: computation_account, checked by the arcium program.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_TRANSFER_BETWEEN_ACCOUNTS))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+#[callback_accounts("transfer_between_accounts")]
+#[derive(Accounts)]
+pub struct TransferBetweenAccountsCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_TRANSFER_BETWEEN_ACCOUNTS))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: instructions_sysvar, checked by the account constraint
+    pub instructions_sysvar: UncheckedAccount<'info>,
+    /// Sender balance — callback writes the new sender ciphertext here.
+    #[account(mut)]
+    pub sender_balance: Account<'info, ConfidentialBalance>,
+    /// Receiver balance — callback writes the new receiver ciphertext here.
+    #[account(mut)]
+    pub receiver_balance: Account<'info, ConfidentialBalance>,
+}
+
+#[init_computation_definition_accounts("transfer_between_accounts", payer)]
+#[derive(Accounts)]
+pub struct InitTransferBetweenAccountsCompDef<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
