@@ -25,6 +25,7 @@ mod circuits {
     }
 
     /// Add the client-encrypted `amount` to the stored MXE-owned balance.
+    /// Saturating: if the deposit would exceed u64::MAX, cap rather than wrap.
     #[instruction]
     pub fn deposit_to_account(
         amount_ctxt: Enc<Shared, u64>,
@@ -32,7 +33,9 @@ mod circuits {
     ) -> Enc<Mxe, u64> {
         let amount = amount_ctxt.to_arcis();
         let balance = balance_ctxt.to_arcis();
-        balance_ctxt.owner.from_arcis(balance + amount)
+        let sum = balance + amount;
+        let new_balance = if sum < balance { u64::MAX } else { sum };
+        balance_ctxt.owner.from_arcis(new_balance)
     }
 
     /// Spend `amount` from the stored MXE-owned balance with no-overdraft.
@@ -86,17 +89,22 @@ mod circuits {
         let input = input_ctxt.to_arcis();
         let sufficient = input.sender_balance >= input.amount;
         let moved = if sufficient { input.amount } else { 0 };
+        let recv_sum = input.receiver_balance + moved;
+        let new_receiver = if recv_sum < input.receiver_balance { u64::MAX } else { recv_sum };
         input_ctxt.owner.from_arcis(TransferResult {
             new_sender_balance: input.sender_balance - moved,
-            new_receiver_balance: input.receiver_balance + moved,
+            new_receiver_balance: new_receiver,
         })
     }
 
-    /// Add `amount` to the confidential balance (real tokens move publicly into the vault).
+    /// Add `amount` to the confidential balance (real tokens move publicly into
+    /// the vault). Saturating: cap at u64::MAX rather than wrapping on overflow.
     #[instruction]
     pub fn deposit(input_ctxt: Enc<Shared, DebitInput>) -> Enc<Shared, u64> {
         let input = input_ctxt.to_arcis();
-        input_ctxt.owner.from_arcis(input.balance + input.amount)
+        let sum = input.balance + input.amount;
+        let new_balance = if sum < input.balance { u64::MAX } else { sum };
+        input_ctxt.owner.from_arcis(new_balance)
     }
 
     /// Debit on withdraw with no-overdraft check.
