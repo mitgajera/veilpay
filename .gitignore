@@ -26,6 +26,10 @@ yarn-error.log*
 *.env.local
 .env.*
 
+# Agent skills (installed via `npx skills add`)
+.agents/
+skills-lock.json
+
 # Editor
 .vscode/
 .idea
