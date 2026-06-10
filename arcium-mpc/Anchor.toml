@@ -7,10 +7,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-veilpay = "nf3B37iqKjktMxUQnShsaDgF1EReTf4oe8HD6XqcjJW"
+veilpay = "86GqsKmVJS3nktawPjrHMHGvYSDnwRLzKthjxoXYDqK2"
 
 [programs.devnet]
-veilpay = "nf3B37iqKjktMxUQnShsaDgF1EReTf4oe8HD6XqcjJW"
+veilpay = "86GqsKmVJS3nktawPjrHMHGvYSDnwRLzKthjxoXYDqK2"
 
 [registry]
 url = "https://api.apr.dev"
