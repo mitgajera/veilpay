@@ -498,6 +498,89 @@ describe("Veilpay", () => {
     console.log("Balance after +100, overdraft 999 (no-op), -30:", e.balance.toString());
     expect(e.balance.toString()).to.equal("70");
   });
+
+  it("transfers between persistent balances: +100 sender -> transfer 40 -> sender 60 / receiver 40", async () => {
+    await initCompDef("init_balance", "initInitBalanceCompDef");
+    await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
+    await initCompDef("transfer_between_accounts", "initTransferBetweenAccountsCompDef");
+    await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
+
+    const sender = (provider as anchor.AnchorProvider).wallet.publicKey;
+    const receiverKp = anchor.web3.Keypair.generate();
+    const receiver = receiverKp.publicKey;
+    const mint = anchor.web3.Keypair.generate().publicKey;
+
+    // fund the receiver so it can pay rent for its own balance account
+    const air = await provider.connection.requestAirdrop(receiver, 1_000_000_000);
+    await provider.connection.confirmTransaction(air, "confirmed");
+
+    const [senderBal] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), sender.toBuffer(), mint.toBuffer()], program.programId);
+    const [receiverBal] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), receiver.toBuffer(), mint.toBuffer()], program.programId);
+
+    const initBal = async (bal: PublicKey, ownerKp?: anchor.web3.Keypair) => {
+      const off = new anchor.BN(randomBytes(8), "hex");
+      let m = program.methods.initBalance(off).accountsPartial({
+        payer: ownerKp ? ownerKp.publicKey : sender, mint,
+        confidentialBalance: bal, ...compAccounts("init_balance", off),
+      });
+      if (ownerKp) m = m.signers([ownerKp]);
+      await m.rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    };
+    await initBal(senderBal);
+    await initBal(receiverBal, receiverKp);
+
+    // deposit 100 to sender
+    {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([BigInt(100)], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({ mint, confidentialBalance: senderBal, ...compAccounts("deposit_to_account", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // transfer 40 sender -> receiver (sender signs; both balances read on-chain)
+    {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([BigInt(40)], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .transferBetweenAccounts(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({
+          mint, receiver, senderBalance: senderBal, receiverBalance: receiverBal,
+          ...compAccounts("transfer_between_accounts", off),
+        })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    const reveal = async (bal: PublicKey, ownerKp?: anchor.web3.Keypair) => {
+      const ev = awaitEvent("accountBalanceRevealedEvent");
+      const off = new anchor.BN(randomBytes(8), "hex");
+      let m = program.methods.revealAccountBalance(off).accountsPartial({
+        payer: ownerKp ? ownerKp.publicKey : sender, mint,
+        confidentialBalance: bal, ...compAccounts("reveal_account_balance", off),
+      });
+      if (ownerKp) m = m.signers([ownerKp]);
+      await m.rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+      return (await ev).balance.toString();
+    };
+    const senderAfter = await reveal(senderBal);
+    const receiverAfter = await reveal(receiverBal, receiverKp);
+    console.log("after transfer 40 -> sender:", senderAfter, "receiver:", receiverAfter);
+    expect(senderAfter).to.equal("60");
+    expect(receiverAfter).to.equal("40");
+  });
 });
 
 async function getMXEPublicKeyWithRetry(
