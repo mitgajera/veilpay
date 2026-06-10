@@ -11,7 +11,7 @@ use errors::ErrorCode;
 use events::*;
 use instructions::*;
 
-declare_id!("nf3B37iqKjktMxUQnShsaDgF1EReTf4oe8HD6XqcjJW");
+declare_id!("86GqsKmVJS3nktawPjrHMHGvYSDnwRLzKthjxoXYDqK2");
 
 #[arcium_program]
 pub mod veilpay {
@@ -68,7 +68,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(DebitOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(DebitEvent {
@@ -130,7 +133,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(TransferOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(TransferEvent {
@@ -191,7 +197,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(DepositOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(DepositEvent {
@@ -252,7 +261,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(WithdrawOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(WithdrawEvent {
@@ -308,7 +320,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(ViewBalanceOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(ViewBalanceEvent {
@@ -367,7 +382,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(ProveThresholdOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(ProveThresholdEvent {
@@ -424,7 +442,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(RevealToAuditorOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(AuditorRevealEvent {
@@ -493,7 +514,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(BatchTransferOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(BatchTransferEvent {
@@ -551,7 +575,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(InitBalanceOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         let bal = &mut ctx.accounts.confidential_balance;
@@ -617,7 +644,80 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(DepositToAccountOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
+        };
+
+        let bal = &mut ctx.accounts.confidential_balance;
+        bal.encrypted_balance = o.ciphertexts;
+        bal.nonce = o.nonce;
+        Ok(())
+    }
+
+    pub fn init_debit_from_account_comp_def(
+        ctx: Context<InitDebitFromAccountCompDef>,
+    ) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    /// Spend `amount` from the stored confidential balance with no-overdraft.
+    /// The balance is read from the on-chain ciphertext (offset 9), not from the
+    /// client — so the client can't claim a balance they don't have. The MPC
+    /// enforces `balance >= amount`; the callback writes the new ciphertext back.
+    pub fn debit_from_account(
+        ctx: Context<DebitFromAccount>,
+        computation_offset: u64,
+        ciphertext_amount: [u8; 32],
+        pubkey: [u8; 32],
+        amount_nonce: u128,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+        let args = ArgBuilder::new()
+            // Enc<Shared, u64> amount (from client)
+            .x25519_pubkey(pubkey)
+            .plaintext_u128(amount_nonce)
+            .encrypted_u64(ciphertext_amount)
+            // Enc<Mxe, u64> stored balance (read from the account at offset 9)
+            .plaintext_u128(ctx.accounts.confidential_balance.nonce)
+            .account(ctx.accounts.confidential_balance.key(), 8 + 1, 32)
+            .build();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            vec![DebitFromAccountCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[CallbackAccount {
+                    pubkey: ctx.accounts.confidential_balance.key(),
+                    is_writable: true,
+                }],
+            )?],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "debit_from_account")]
+    pub fn debit_from_account_callback(
+        ctx: Context<DebitFromAccountCallback>,
+        output: SignedComputationOutputs<DebitFromAccountOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(DebitFromAccountOutput { field_0 }) => field_0,
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         let bal = &mut ctx.accounts.confidential_balance;
@@ -671,7 +771,10 @@ pub mod veilpay {
             &ctx.accounts.computation_account,
         ) {
             Ok(RevealAccountBalanceOutput { field_0 }) => field_0,
-            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
         };
 
         emit!(AccountBalanceRevealedEvent { balance });

@@ -35,6 +35,21 @@ mod circuits {
         balance_ctxt.owner.from_arcis(balance + amount)
     }
 
+    /// Spend `amount` from the stored MXE-owned balance with no-overdraft.
+    /// The balance is read from on-chain ciphertext (client can't fake it); if
+    /// `balance < amount` the balance is left unchanged (oblivious select).
+    #[instruction]
+    pub fn debit_from_account(
+        amount_ctxt: Enc<Shared, u64>,
+        balance_ctxt: Enc<Mxe, u64>,
+    ) -> Enc<Mxe, u64> {
+        let amount = amount_ctxt.to_arcis();
+        let balance = balance_ctxt.to_arcis();
+        let sufficient = balance >= amount;
+        let new_balance = if sufficient { balance - amount } else { balance };
+        balance_ctxt.owner.from_arcis(new_balance)
+    }
+
     /// Reveal the stored MXE-owned balance (verification/testing).
     #[instruction]
     pub fn reveal_account_balance(balance_ctxt: Enc<Mxe, u64>) -> u64 {
