@@ -430,6 +430,74 @@ describe("Veilpay", () => {
     // e.balance is an Anchor BN (u64), not a bigint — compare as strings.
     expect(e.balance.toString()).to.equal("150");
   });
+
+  it("spends from a persistent balance: +100 -> overdraft 999 (no-op) -> debit 30 -> reveal 70", async () => {
+    await initCompDef("init_balance", "initInitBalanceCompDef");
+    await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
+    await initCompDef("debit_from_account", "initDebitFromAccountCompDef");
+    await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
+
+    const payer = (provider as anchor.AnchorProvider).wallet.publicKey;
+    const mint = anchor.web3.Keypair.generate().publicKey;
+    const [balancePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), payer.toBuffer(), mint.toBuffer()],
+      program.programId,
+    );
+
+    // init -> 0
+    {
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .initBalance(off)
+        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("init_balance", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // deposit 100
+    {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([BigInt(100)], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("deposit_to_account", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // debit helper — balance is read from the account, client only provides the amount
+    const debit = async (amount: bigint) => {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([amount], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .debitFromAccount(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("debit_from_account", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    };
+
+    await debit(BigInt(999)); // overdraft: 999 > 100 -> balance unchanged (no-op)
+    await debit(BigInt(30));  // 100 - 30 -> 70
+
+    // reveal -> 70 (proves overdraft was a no-op and the debit applied)
+    const ev = awaitEvent("accountBalanceRevealedEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .revealAccountBalance(off)
+      .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("reveal_account_balance", off) })
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    console.log("Balance after +100, overdraft 999 (no-op), -30:", e.balance.toString());
+    expect(e.balance.toString()).to.equal("70");
+  });
 });
 
 async function getMXEPublicKeyWithRetry(
