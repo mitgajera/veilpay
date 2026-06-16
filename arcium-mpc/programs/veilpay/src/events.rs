@@ -1,5 +1,31 @@
 use anchor_lang::prelude::*;
 
+/// Emitted by `initialize_mint` when a new custodied mint is configured.
+#[event]
+pub struct MintInitialized {
+    pub authority: Pubkey,
+    pub mint: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when real tokens are moved into the vault (public on-ramp amount).
+#[event]
+pub struct DepositMade {
+    pub owner: Pubkey,
+    pub mint: Pubkey,
+    pub amount: u64,
+    pub timestamp: i64,
+}
+
+/// Emitted when real tokens are released from the vault (public off-ramp amount).
+#[event]
+pub struct WithdrawalMade {
+    pub owner: Pubkey,
+    pub mint: Pubkey,
+    pub amount: u64,
+    pub timestamp: i64,
+}
+
 /// Emitted by `debit_callback` with the new encrypted balance.
 #[event]
 pub struct DebitEvent {

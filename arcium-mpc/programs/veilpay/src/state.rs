@@ -22,3 +22,19 @@ pub struct ConfidentialBalance {
     pub owner: Pubkey,
     pub mint: Pubkey,
 }
+
+/// Vault configuration for one SPL mint custodied by the protocol.
+///
+/// The real tokens live in a `vault` token account whose authority is this
+/// PDA. Deposits move tokens in (public amount), withdrawals move them out
+/// (public amount) — only the confidential balances computed in MPC are
+/// private. `total_deposited`/`total_withdrawn` track the public on/off-ramp.
+#[account]
+#[derive(InitSpace)]
+pub struct MintConfig {
+    pub authority: Pubkey,
+    pub mint: Pubkey,
+    pub total_deposited: u64,
+    pub total_withdrawn: u64,
+    pub bump: u8,
+}

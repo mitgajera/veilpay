@@ -5,6 +5,7 @@ pub mod deposit;
 pub mod prove_threshold;
 pub mod reveal_to_auditor;
 pub mod transfer;
+pub mod vault;
 pub mod view_balance;
 pub mod withdraw;
 
@@ -15,5 +16,6 @@ pub use deposit::*;
 pub use prove_threshold::*;
 pub use reveal_to_auditor::*;
 pub use transfer::*;
+pub use vault::*;
 pub use view_balance::*;
 pub use withdraw::*;
