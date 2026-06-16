@@ -18,7 +18,10 @@ pub mod veilpay {
     use super::*;
     use arcium_client::idl::arcium::types::CallbackAccount;
 
-    // debit
+    /// Configure a new SPL mint for confidential custody (creates MintConfig + mint).
+    pub fn initialize_mint(ctx: Context<InitializeMint>) -> Result<()> {
+        initialize_mint_handler(ctx)
+    }
 
     /// One-time: register the `debit` circuit definition with the MXE.
     pub fn init_debit_comp_def(ctx: Context<InitDebitCompDef>) -> Result<()> {
@@ -80,8 +83,6 @@ pub mod veilpay {
         });
         Ok(())
     }
-
-    // transfer
 
     /// One-time: register the `transfer` circuit definition with the MXE.
     pub fn init_transfer_comp_def(ctx: Context<InitTransferCompDef>) -> Result<()> {
@@ -147,8 +148,6 @@ pub mod veilpay {
         Ok(())
     }
 
-    // deposit
-
     /// One-time: register the `deposit` circuit definition with the MXE.
     pub fn init_deposit_comp_def(ctx: Context<InitDepositCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
@@ -209,8 +208,6 @@ pub mod veilpay {
         });
         Ok(())
     }
-
-    // withdraw
 
     /// One-time: register the `withdraw` circuit definition with the MXE.
     pub fn init_withdraw_comp_def(ctx: Context<InitWithdrawCompDef>) -> Result<()> {
@@ -274,8 +271,6 @@ pub mod veilpay {
         Ok(())
     }
 
-    // view_balance
-
     pub fn init_view_balance_comp_def(ctx: Context<InitViewBalanceCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
         Ok(())
@@ -332,8 +327,6 @@ pub mod veilpay {
         });
         Ok(())
     }
-
-    // prove_threshold
 
     pub fn init_prove_threshold_comp_def(ctx: Context<InitProveThresholdCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
@@ -394,8 +387,6 @@ pub mod veilpay {
         Ok(())
     }
 
-    // reveal_to_auditor
-
     pub fn init_reveal_to_auditor_comp_def(
         ctx: Context<InitRevealToAuditorCompDef>,
     ) -> Result<()> {
@@ -454,8 +445,6 @@ pub mod veilpay {
         });
         Ok(())
     }
-
-    // batch_transfer
 
     pub fn init_batch_transfer_comp_def(ctx: Context<InitBatchTransferCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
@@ -530,8 +519,6 @@ pub mod veilpay {
         Ok(())
     }
 
-    // Stage 3: persistent MXE-owned balances
-
     pub fn init_init_balance_comp_def(ctx: Context<InitInitBalanceCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
         Ok(())
@@ -594,23 +581,52 @@ pub mod veilpay {
         Ok(())
     }
 
-    /// Deposit into the stored confidential balance: pass the client-encrypted
-    /// amount + the on-chain ciphertext to the MPC cluster; the callback writes
-    /// the new ciphertext back to the account.
+    /// Deposit real tokens into the vault and credit the confidential balance.
+    /// `amount` is PUBLIC (the tokens visibly move into the vault), so it is
+    /// passed to the circuit as plaintext and the credited amount is bound to
+    /// the on-chain transfer — no balance can be minted from thin air. The MPC
+    /// adds it to the stored ciphertext; the callback writes the new balance.
     pub fn deposit_to_account(
         ctx: Context<DepositToAccount>,
         computation_offset: u64,
-        ciphertext_amount: [u8; 32],
-        pubkey: [u8; 32],
-        amount_nonce: u128,
+        amount: u64,
     ) -> Result<()> {
+        require!(amount > 0, ErrorCode::InvalidAmount);
+        require!(
+            ctx.accounts.owner_token_account.amount >= amount,
+            ErrorCode::InsufficientFunds
+        );
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
+        // Move the real tokens into the vault (public on-ramp).
+        anchor_spl::token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.key(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.owner_token_account.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                    authority: ctx.accounts.payer.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        let mint_config = &mut ctx.accounts.mint_config;
+        mint_config.total_deposited = mint_config
+            .total_deposited
+            .checked_add(amount)
+            .ok_or(ErrorCode::Overflow)?;
+
+        emit!(DepositMade {
+            owner: ctx.accounts.payer.key(),
+            mint: ctx.accounts.mint.key(),
+            amount,
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+
         let args = ArgBuilder::new()
-            // Enc<Shared, u64> amount (from client)
-            .x25519_pubkey(pubkey)
-            .plaintext_u128(amount_nonce)
-            .encrypted_u64(ciphertext_amount)
+            // PUBLIC plaintext amount (bound to the token transfer above)
+            .plaintext_u64(amount)
             // Enc<Mxe, u64> stored balance (read from the account at offset 9)
             .plaintext_u128(ctx.accounts.confidential_balance.nonce)
             .account(ctx.accounts.confidential_balance.key(), 8 + 1, 32)
@@ -723,6 +739,131 @@ pub mod veilpay {
         let bal = &mut ctx.accounts.confidential_balance;
         bal.encrypted_balance = o.ciphertexts;
         bal.nonce = o.nonce;
+        Ok(())
+    }
+
+    pub fn init_withdraw_from_account_comp_def(
+        ctx: Context<InitWithdrawFromAccountCompDef>,
+    ) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    /// Withdraw a PUBLIC `amount` of real tokens from the vault, debiting the
+    /// confidential balance. Two-phase: the MPC checks `balance >= amount` over
+    /// the hidden balance and reveals only the released amount; the callback
+    /// releases exactly that many tokens (0 if short). The balance is read from
+    /// the on-chain ciphertext (offset 9), so it can't be faked.
+    pub fn withdraw_from_account(
+        ctx: Context<WithdrawFromAccount>,
+        computation_offset: u64,
+        amount: u64,
+    ) -> Result<()> {
+        require!(amount > 0, ErrorCode::InvalidAmount);
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+        let args = ArgBuilder::new()
+            // PUBLIC plaintext amount requested
+            .plaintext_u64(amount)
+            // Enc<Mxe, u64> stored balance (read from the account at offset 9)
+            .plaintext_u128(ctx.accounts.confidential_balance.nonce)
+            .account(ctx.accounts.confidential_balance.key(), 8 + 1, 32)
+            .build();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            vec![WithdrawFromAccountCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[
+                    CallbackAccount {
+                        pubkey: ctx.accounts.confidential_balance.key(),
+                        is_writable: true,
+                    },
+                    CallbackAccount {
+                        pubkey: ctx.accounts.mint_config.key(),
+                        is_writable: true,
+                    },
+                    CallbackAccount {
+                        pubkey: ctx.accounts.vault.key(),
+                        is_writable: true,
+                    },
+                    CallbackAccount {
+                        pubkey: ctx.accounts.owner_token_account.key(),
+                        is_writable: true,
+                    },
+                    CallbackAccount {
+                        pubkey: anchor_spl::token::ID,
+                        is_writable: false,
+                    },
+                ],
+            )?],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "withdraw_from_account")]
+    pub fn withdraw_from_account_callback(
+        ctx: Context<WithdrawFromAccountCallback>,
+        output: SignedComputationOutputs<WithdrawFromAccountOutput>,
+    ) -> Result<()> {
+        // Tuple return: field_0 = new encrypted balance, field_1 = revealed
+        // released amount (0 if the hidden balance was insufficient).
+        let o = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(WithdrawFromAccountOutput { field_0 }) => field_0,
+            Err(e) => {
+                msg!("Computation aborted, no valid MPC output: {}", e);
+                return Err(ErrorCode::AbortedComputation.into());
+            }
+        };
+
+        let new_balance = o.field_0;
+        let released = o.field_1;
+
+        let bal = &mut ctx.accounts.confidential_balance;
+        bal.encrypted_balance = new_balance.ciphertexts;
+        bal.nonce = new_balance.nonce;
+
+        if released > 0 {
+            let mint_key = ctx.accounts.mint_config.mint;
+            let bump = ctx.accounts.mint_config.bump;
+            let bump_arr = [bump];
+            let seeds: &[&[u8]] = &[b"mint_config", mint_key.as_ref(), &bump_arr];
+            let signer_seeds = &[seeds];
+
+            anchor_spl::token::transfer(
+                CpiContext::new_with_signer(
+                    anchor_spl::token::ID,
+                    anchor_spl::token::Transfer {
+                        from: ctx.accounts.vault.to_account_info(),
+                        to: ctx.accounts.owner_token_account.to_account_info(),
+                        authority: ctx.accounts.mint_config.to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                released,
+            )?;
+
+            let mc = &mut ctx.accounts.mint_config;
+            mc.total_withdrawn = mc
+                .total_withdrawn
+                .checked_add(released)
+                .ok_or(ErrorCode::Overflow)?;
+
+            emit!(WithdrawalMade {
+                owner: ctx.accounts.owner_token_account.owner,
+                mint: mint_key,
+                amount: released,
+                timestamp: Clock::get()?.unix_timestamp,
+            });
+        }
         Ok(())
     }
 
