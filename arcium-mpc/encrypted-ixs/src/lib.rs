@@ -15,8 +15,6 @@ mod circuits {
         balance: u64,
     }
 
-    // Persistent MXE-owned balances (stored on-chain as Enc<Mxe, u64>)
-
     /// Create a fresh confidential balance of 0, encrypted to the MXE.
     #[instruction]
     pub fn init_balance() -> Enc<Mxe, u64> {
@@ -24,14 +22,13 @@ mod circuits {
         Mxe::get().from_arcis(zero)
     }
 
-    /// Add the client-encrypted `amount` to the stored MXE-owned balance.
-    /// Saturating: if the deposit would exceed u64::MAX, cap rather than wrap.
+    /// Add a PUBLIC `amount` (bound to the on-chain token transfer into the
+    /// vault) to the stored MXE-owned balance. The amount is plaintext because
+    /// the deposit is a public on-ramp — the tokens visibly move into the vault,
+    /// so the credited amount must equal that public amount (no minting from
+    /// thin air). Saturating: cap at u64::MAX rather than wrap on overflow.
     #[instruction]
-    pub fn deposit_to_account(
-        amount_ctxt: Enc<Shared, u64>,
-        balance_ctxt: Enc<Mxe, u64>,
-    ) -> Enc<Mxe, u64> {
-        let amount = amount_ctxt.to_arcis();
+    pub fn deposit_to_account(amount: u64, balance_ctxt: Enc<Mxe, u64>) -> Enc<Mxe, u64> {
         let balance = balance_ctxt.to_arcis();
         let sum = balance + amount;
         let new_balance = if sum < balance { u64::MAX } else { sum };
@@ -51,6 +48,24 @@ mod circuits {
         let sufficient = balance >= amount;
         let new_balance = if sufficient { balance - amount } else { balance };
         balance_ctxt.owner.from_arcis(new_balance)
+    }
+
+    /// Withdraw a PUBLIC `amount` from the stored MXE-owned balance with
+    /// no-overdraft. Returns the new encrypted balance plus the REVEALED amount
+    /// actually released: `amount` if the hidden balance covers it, else 0. The
+    /// callback transfers exactly that many tokens out of the vault — so nothing
+    /// can leave unless the MPC confirmed sufficiency, all without revealing the
+    /// balance itself.
+    #[instruction]
+    pub fn withdraw_from_account(
+        amount: u64,
+        balance_ctxt: Enc<Mxe, u64>,
+    ) -> (Enc<Mxe, u64>, u64) {
+        let balance = balance_ctxt.to_arcis();
+        let sufficient = balance >= amount;
+        let released = if sufficient { amount } else { 0 };
+        let new_balance = balance - released;
+        (balance_ctxt.owner.from_arcis(new_balance), released.reveal())
     }
 
     /// Confidential transfer between two stored MXE-owned balances: debit the
