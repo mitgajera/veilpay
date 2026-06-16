@@ -11,7 +11,7 @@ use errors::ErrorCode;
 use events::*;
 use instructions::*;
 
-declare_id!("86GqsKmVJS3nktawPjrHMHGvYSDnwRLzKthjxoXYDqK2");
+declare_id!("AVqXCN6eZshXdAaRHhBV4AMxpsVZKj9jRCdSQptax7GD");
 
 #[arcium_program]
 pub mod veilpay {
