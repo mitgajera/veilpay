@@ -183,20 +183,33 @@ mod circuits {
         new_r3: u64,
     }
 
-    /// Send secret amounts to 3 recipients in one computation; nothing moves if total exceeds balance.
+    /// Send secret amounts to 3 recipients in one computation; nothing moves if
+    /// the total exceeds the balance. The running total is overflow-checked: if
+    /// `a1 + a2 + a3` would wrap past u64::MAX it is treated as insufficient
+    /// (so no money is minted), and each recipient credit is saturating.
     #[instruction]
     pub fn batch_transfer(input_ctxt: Enc<Shared, BatchInput>) -> Enc<Shared, BatchResult> {
         let input = input_ctxt.to_arcis();
-        let total = input.a1 + input.a2 + input.a3;
-        let sufficient = input.sender_balance >= total;
+        let s12 = input.a1 + input.a2;
+        let o12 = s12 < input.a1;
+        let total = s12 + input.a3;
+        let o123 = total < s12;
+        let overflowed = o12 || o123;
+        let sufficient = !overflowed && input.sender_balance >= total;
         let m1 = if sufficient { input.a1 } else { 0 };
         let m2 = if sufficient { input.a2 } else { 0 };
         let m3 = if sufficient { input.a3 } else { 0 };
+        let c1 = input.r1_balance + m1;
+        let new_r1 = if c1 < input.r1_balance { u64::MAX } else { c1 };
+        let c2 = input.r2_balance + m2;
+        let new_r2 = if c2 < input.r2_balance { u64::MAX } else { c2 };
+        let c3 = input.r3_balance + m3;
+        let new_r3 = if c3 < input.r3_balance { u64::MAX } else { c3 };
         input_ctxt.owner.from_arcis(BatchResult {
             new_sender: input.sender_balance - (m1 + m2 + m3),
-            new_r1: input.r1_balance + m1,
-            new_r2: input.r2_balance + m2,
-            new_r3: input.r3_balance + m3,
+            new_r1,
+            new_r2,
+            new_r3,
         })
     }
 }
