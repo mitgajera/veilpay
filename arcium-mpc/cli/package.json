@@ -1,0 +1,23 @@
+{
+  "name": "veilpay-mpc-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VeilPay MPC CLI — drive the Arcium confidential payment program from the terminal",
+  "scripts": {
+    "veilpay": "ts-node src/index.ts",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anchor-lang/core": "^1.0.2",
+    "@arcium-hq/client": "0.10.4",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.98.4",
+    "commander": "^12.0.0",
+    "picocolors": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}
