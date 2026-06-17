@@ -1,44 +1,28 @@
 import { Command } from "commander";
 import { initMintCmd } from "./commands/init-mint";
+import { initCompDefsCmd } from "./commands/init-comp-defs";
 import { initBalanceCmd } from "./commands/init-balance";
 import { depositCmd } from "./commands/deposit";
-import { sendCmd } from "./commands/send";
-import { applyCmd } from "./commands/apply";
+import { transferCmd } from "./commands/transfer";
 import { withdrawCmd } from "./commands/withdraw";
-import { balanceCmd } from "./commands/balance";
-import { activityCmd } from "./commands/activity";
-import { mintTokensCmd } from "./commands/mint-tokens";
-import { initUsdcCmd } from "./commands/init-usdc";
-import { wrapSolCmd } from "./commands/wrap-sol";
-import { closeCmd } from "./commands/close";
-import { batchSendCmd } from "./commands/batch-send";
-import { configCmd } from "./commands/config";
-import { infoCmd } from "./commands/info";
+import { revealCmd } from "./commands/reveal";
 
 const cli = new Command();
 
 cli
   .name("veilpay")
-  .description("VeilPay CLI — privacy-first payments on Solana")
+  .description("VeilPay MPC CLI - confidential payments on Solana via Arcium")
   .version("0.1.0");
 
 cli.addCommand(initMintCmd());
+cli.addCommand(initCompDefsCmd());
 cli.addCommand(initBalanceCmd());
 cli.addCommand(depositCmd());
-cli.addCommand(sendCmd());
-cli.addCommand(applyCmd());
+cli.addCommand(transferCmd());
 cli.addCommand(withdrawCmd());
-cli.addCommand(balanceCmd());
-cli.addCommand(activityCmd());
-cli.addCommand(mintTokensCmd());
-cli.addCommand(initUsdcCmd());
-cli.addCommand(wrapSolCmd());
-cli.addCommand(closeCmd());
-cli.addCommand(batchSendCmd());
-cli.addCommand(configCmd());
-cli.addCommand(infoCmd());
+cli.addCommand(revealCmd());
 
 cli.parseAsync(process.argv).catch((err) => {
-  console.error("Error:", err.message ?? err);
+  console.error("Error:", err?.message ?? err);
   process.exit(1);
 });
