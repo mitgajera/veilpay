@@ -1,114 +1,80 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use arcium_anchor::prelude::*;
 
-use crate::errors::VeilPayError;
-use crate::events::WithdrawalMade;
-use crate::state::{ConfidentialBalance, MintConfig};
-use crate::utils::withdrawal_proof_hash;
+use crate::{ArciumSignerAccount, ID, ID_CONST};
+use crate::constants::COMP_DEF_OFFSET_WITHDRAW;
 
+#[queue_computation_accounts("withdraw", payer)]
 #[derive(Accounts)]
+#[instruction(computation_offset: u64)]
 pub struct Withdraw<'info> {
-    #[account(
-        mut,
-        seeds = [b"balance", owner.key().as_ref()],
-        bump = confidential_balance.bump,
-        constraint = confidential_balance.owner == owner.key() @ VeilPayError::Unauthorized,
-        constraint = !confidential_balance.is_frozen @ VeilPayError::AccountFrozen,
-    )]
-    pub confidential_balance: Account<'info, ConfidentialBalance>,
-
     #[account(mut)]
-    pub owner: Signer<'info>,
-
+    pub payer: Signer<'info>,
     #[account(
-        mut,
-        constraint = owner_token_account.owner == owner.key() @ VeilPayError::Unauthorized,
-        constraint = owner_token_account.mint == mint_config.mint @ VeilPayError::InvalidMint,
-    )]
-    pub owner_token_account: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        seeds = [b"vault", mint_config.key().as_ref()],
+        init_if_needed,
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
         bump,
-        token::mint = mint_config.mint,
-        token::authority = mint_config,
+        address = derive_sign_pda!(),
     )]
-    pub vault: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        seeds = [b"mint_config", mint.key().as_ref()],
-        bump = mint_config.bump,
-    )]
-    pub mint_config: Account<'info, MintConfig>,
-
-    #[account(constraint = mint.key() == mint_config.mint @ VeilPayError::InvalidMint)]
-    pub mint: Account<'info, Mint>,
-
-    pub token_program: Program<'info, Token>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: mempool_account, checked by the arcium program.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: executing_pool, checked by the arcium program.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: computation_account, checked by the arcium program.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_WITHDRAW))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
     pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
 }
 
-pub fn handler(
-    ctx: Context<Withdraw>,
-    amount: u64,
-    new_encrypted_balance: [u8; 64],
-    balance_commitment: [u8; 32],
-    withdrawal_proof: [u8; 32],
-) -> Result<()> {
-    require!(amount > 0, VeilPayError::InvalidAmount);
+#[callback_accounts("withdraw")]
+#[derive(Accounts)]
+pub struct WithdrawCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_WITHDRAW))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: instructions_sysvar, checked by the account constraint
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
 
-    let balance = &ctx.accounts.confidential_balance;
-    let expected_proof = withdrawal_proof_hash(
-        &balance.owner_commitment,
-        amount,
-        balance.nonce,
-    );
-    require!(
-        expected_proof == withdrawal_proof,
-        VeilPayError::InvalidWithdrawalProof
-    );
-
-    let mint_key = ctx.accounts.mint_config.mint;
-    let mint_config_bump = ctx.accounts.mint_config.bump;
-    let seeds = &[b"mint_config".as_ref(), mint_key.as_ref(), &[mint_config_bump]];
-    let signer = &[&seeds[..]];
-
-    let cpi_ctx = CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        Transfer {
-            from: ctx.accounts.vault.to_account_info(),
-            to: ctx.accounts.owner_token_account.to_account_info(),
-            authority: ctx.accounts.mint_config.to_account_info(),
-        },
-        signer,
-    );
-    token::transfer(cpi_ctx, amount)?;
-
-    let balance = &mut ctx.accounts.confidential_balance;
-    balance.encrypted_balance = new_encrypted_balance;
-    balance.withdraw_count = balance
-        .withdraw_count
-        .checked_add(1)
-        .ok_or(VeilPayError::Overflow)?;
-    balance.nonce = balance
-        .nonce
-        .checked_add(1)
-        .ok_or(VeilPayError::Overflow)?;
-
-    let mint_config = &mut ctx.accounts.mint_config;
-    mint_config.total_withdrawn = mint_config
-        .total_withdrawn
-        .checked_add(amount)
-        .ok_or(VeilPayError::Overflow)?;
-
-    emit!(WithdrawalMade {
-        owner: ctx.accounts.owner.key(),
-        balance_commitment,
-        withdraw_index: ctx.accounts.confidential_balance.withdraw_count,
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
-    Ok(())
+#[init_computation_definition_accounts("withdraw", payer)]
+#[derive(Accounts)]
+pub struct InitWithdrawCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program. Not initialized yet.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
 }

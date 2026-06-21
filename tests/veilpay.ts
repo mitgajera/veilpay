@@ -1,916 +1,613 @@
-import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
+import * as anchor from "@anchor-lang/core";
+import { Program } from "@anchor-lang/core";
+import { PublicKey } from "@solana/web3.js";
 import { Veilpay } from "../target/types/veilpay";
-import { assert } from "chai";
-import { PublicKey, Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { randomBytes } from "crypto";
 import {
-  createAssociatedTokenAccount,
-  getAccount,
-  mintTo,
-} from "@solana/spl-token";
-import { createHash } from "crypto";
+  awaitComputationFinalization,
+  getArciumEnv,
+  getCompDefAccOffset,
+  getArciumAccountBaseSeed,
+  getArciumProgramId,
+  getArciumProgram,
+  uploadCircuit,
+  RescueCipher,
+  deserializeLE,
+  getMXEPublicKey,
+  getMXEAccAddress,
+  getMempoolAccAddress,
+  getCompDefAccAddress,
+  getExecutingPoolAccAddress,
+  getComputationAccAddress,
+  getClusterAccAddress,
+  getLookupTableAddress,
+  x25519,
+} from "@arcium-hq/client";
+import * as fs from "fs";
+import * as os from "os";
+import { expect } from "chai";
 
-const TOKEN_PROGRAM_ID = new PublicKey(
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-);
-
-// SHA256 matching Rust's hashv — concatenates all inputs then hashes once
-function sha256(...bufs: Buffer[]): Buffer {
-  const h = createHash("sha256");
-  for (const b of bufs) h.update(b);
-  return h.digest();
-}
-
-function u64LE(n: number): Buffer {
-  const b = Buffer.allocUnsafe(8);
-  b.writeBigUInt64LE(BigInt(n));
-  return b;
-}
-
-// Matches Rust: hashv(&[encrypted_amount, &nonce.to_le_bytes(), receiver_commitment])
-function transferCommitment(
-  encAmt: Buffer,
-  nonce: number,
-  receiverOwnerCommitment: Buffer
-): Buffer {
-  return sha256(encAmt, u64LE(nonce), receiverOwnerCommitment);
-}
-
-// Matches Rust: hashv(&[owner_commitment, &amount.to_le_bytes(), &nonce.to_le_bytes()])
-function withdrawalProof(
-  ownerCommitment: Buffer,
-  amount: number,
-  nonce: number
-): Buffer {
-  return sha256(ownerCommitment, u64LE(amount), u64LE(nonce));
-}
-
-describe("VeilPay", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+describe("Veilpay", () => {
+  anchor.setProvider(anchor.AnchorProvider.env());
   const program = anchor.workspace.Veilpay as Program<Veilpay>;
+  const provider = anchor.getProvider();
+  const arciumProgram = getArciumProgram(provider as anchor.AnchorProvider);
 
-  const authority = provider.wallet as anchor.Wallet;
-  const sender = Keypair.generate();
-  const receiver = Keypair.generate();
-  const closer = Keypair.generate();
-  const depositor = Keypair.generate();
+  type Event = anchor.IdlEvents<(typeof program)["idl"]>;
+  const awaitEvent = async <E extends keyof Event>(
+    eventName: E,
+  ): Promise<Event[E]> => {
+    let listenerId: number;
+    const event = await new Promise<Event[E]>((res) => {
+      listenerId = program.addEventListener(eventName, (event) => res(event));
+    });
+    await program.removeEventListener(listenerId);
+    return event;
+  };
 
-  let mintConfigPda: PublicKey;
-  let mintKeypair: Keypair;
-  let senderBalancePda: PublicKey;
-  let receiverBalancePda: PublicKey;
-  let closerBalancePda: PublicKey;
-  let depositorBalancePda: PublicKey;
-  let depositorAta: PublicKey;
-  let vaultPda: PublicKey;
+  const arciumEnv = getArciumEnv();
+  const clusterAccount = getClusterAccAddress(arciumEnv.arciumClusterOffset);
+  const owner = readKpJson(`${os.homedir()}/.config/solana/id.json`);
 
-  let senderOwnerCommitment: Buffer;
-  let receiverOwnerCommitment: Buffer;
-  let closerOwnerCommitment: Buffer;
-  let depositorOwnerCommitment: Buffer;
+  // helpers
 
-  const ZERO_64 = Buffer.alloc(64, 0);
-  const MINT_DECIMALS = 6;
-  const TOKENS = (n: number) => n * 10 ** MINT_DECIMALS;
+  // Register a circuit's computation definition + upload its compiled bytecode.
+  async function initCompDef(
+    circuitName: string,
+    initMethod: string,
+  ): Promise<void> {
+    const offset = getCompDefAccOffset(circuitName);
+    const compDefPDA = PublicKey.findProgramAddressSync(
+      [
+        getArciumAccountBaseSeed("ComputationDefinitionAccount"),
+        program.programId.toBuffer(),
+        offset,
+      ],
+      getArciumProgramId(),
+    )[0];
 
-  async function airdrop(pk: PublicKey, sol = 2) {
-    const sig = await provider.connection.requestAirdrop(
-      pk,
-      sol * LAMPORTS_PER_SOL
+    // On a persistent chain (devnet) the comp def account may already exist from
+    // a prior (possibly interrupted) run. Skip re-init if so (it fails with
+    // "account already in use"), but ALWAYS run the circuit upload below — a
+    // half-uploaded comp def causes error 6300 (ComputationDefinitionNotCompleted)
+    // at compute time, so re-uploading finalizes it. Localnet starts fresh each
+    // run, so init always runs there.
+    const existing = await provider.connection.getAccountInfo(compDefPDA);
+    if (!existing) {
+      const mxeAccount = getMXEAccAddress(program.programId);
+      const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
+      const lutAddress = getLookupTableAddress(program.programId, mxeAcc.lutOffsetSlot);
+
+      await (program.methods as any)
+        [initMethod]()
+        .accounts({
+          compDefAccount: compDefPDA,
+          payer: owner.publicKey,
+          mxeAccount,
+          addressLookupTable: lutAddress,
+        })
+        .signers([owner])
+        .rpc({ commitment: "confirmed" });
+    } else {
+      console.log(`comp def "${circuitName}" exists — skipping init, ensuring circuit upload`);
+    }
+
+    const rawCircuit = fs.readFileSync(`build/${circuitName}.arcis`);
+    await uploadCircuit(
+      provider as anchor.AnchorProvider,
+      circuitName,
+      program.programId,
+      rawCircuit,
+      true,
+      500,
+      { skipPreflight: true, preflightCommitment: "confirmed", commitment: "confirmed" },
     );
-    await provider.connection.confirmTransaction(sig, "confirmed");
   }
 
-  before("Setup accounts and PDAs", async () => {
-    await airdrop(sender.publicKey);
-    await airdrop(receiver.publicKey);
-    await airdrop(closer.publicKey);
-    await airdrop(depositor.publicKey, 3);
+  // Fresh cipher + keypair per call.
+  function newCipher(mxePublicKey: Uint8Array) {
+    const privateKey = x25519.utils.randomSecretKey();
+    const publicKey = x25519.getPublicKey(privateKey);
+    const sharedSecret = x25519.getSharedSecret(privateKey, mxePublicKey);
+    return { cipher: new RescueCipher(sharedSecret), publicKey };
+  }
 
-    mintKeypair = Keypair.generate();
-    [mintConfigPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("mint_config"), mintKeypair.publicKey.toBuffer()],
-      program.programId
+  // Common accountsPartial for a queued computation against a given circuit.
+  function compAccounts(circuitName: string, computationOffset: anchor.BN) {
+    return {
+      computationAccount: getComputationAccAddress(
+        arciumEnv.arciumClusterOffset,
+        computationOffset,
+      ),
+      clusterAccount,
+      mxeAccount: getMXEAccAddress(program.programId),
+      mempoolAccount: getMempoolAccAddress(arciumEnv.arciumClusterOffset),
+      executingPool: getExecutingPoolAccAddress(arciumEnv.arciumClusterOffset),
+      compDefAccount: getCompDefAccAddress(
+        program.programId,
+        Buffer.from(getCompDefAccOffset(circuitName)).readUInt32LE(),
+      ),
+    };
+  }
+
+  let mxePublicKey: Uint8Array;
+
+  before("fetch MXE public key", async () => {
+    mxePublicKey = await getMXEPublicKeyWithRetry(
+      provider as anchor.AnchorProvider,
+      program.programId,
+    );
+    console.log("MXE x25519 pubkey:", Buffer.from(mxePublicKey).toString("hex"));
+  });
+
+  // debit
+
+  it("debit: 100 - 30 = 70", async () => {
+    await initCompDef("debit", "initDebitCompDef");
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(100), BigInt(30)], nonce);
+
+    const ev = awaitEvent("debitEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .debit(off, Array.from(ct[0]), Array.from(ct[1]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("debit", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(70));
+  });
+
+  it("debit: overdraft (20 - 50) leaves 20 unchanged", async () => {
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(20), BigInt(50)], nonce);
+
+    const ev = awaitEvent("debitEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .debit(off, Array.from(ct[0]), Array.from(ct[1]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("debit", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(20));
+  });
+
+  // deposit
+
+  it("deposit: 50 + 30 = 80", async () => {
+    await initCompDef("deposit", "initDepositCompDef");
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(50), BigInt(30)], nonce);
+
+    const ev = awaitEvent("depositEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .deposit(off, Array.from(ct[0]), Array.from(ct[1]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("deposit", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(80));
+  });
+
+  // withdraw
+
+  it("withdraw: 100 - 40 = 60", async () => {
+    await initCompDef("withdraw", "initWithdrawCompDef");
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(100), BigInt(40)], nonce);
+
+    const ev = awaitEvent("withdrawEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .withdraw(off, Array.from(ct[0]), Array.from(ct[1]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("withdraw", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(cipher.decrypt([e.newBalance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(60));
+  });
+
+  // transfer
+
+  it("transfer: sender 100 -> receiver 50, amount 30 => 70 / 80", async () => {
+    await initCompDef("transfer", "initTransferCompDef");
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(100), BigInt(50), BigInt(30)], nonce);
+
+    const ev = awaitEvent("transferEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .transfer(off, Array.from(ct[0]), Array.from(ct[1]), Array.from(ct[2]),
+        Array.from(publicKey), new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("transfer", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    const dec = cipher.decrypt(
+      [e.newSenderBalance, e.newReceiverBalance],
+      Uint8Array.from(e.nonce),
+    );
+    expect(dec[0]).to.equal(BigInt(70));
+    expect(dec[1]).to.equal(BigInt(80));
+  });
+
+  // view_balance
+
+  it("view_balance: re-encrypts 42 back to the owner", async () => {
+    await initCompDef("view_balance", "initViewBalanceCompDef");
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(42)], nonce);
+
+    const ev = awaitEvent("viewBalanceEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .viewBalance(off, Array.from(ct[0]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("view_balance", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(cipher.decrypt([e.balance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(42));
+  });
+
+  // prove_threshold
+
+  it("prove_threshold: 100 >= 50 => true", async () => {
+    await initCompDef("prove_threshold", "initProveThresholdCompDef");
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(100), BigInt(50)], nonce);
+
+    const ev = awaitEvent("proveThresholdEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .proveThreshold(off, Array.from(ct[0]), Array.from(ct[1]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("prove_threshold", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(e.meetsThreshold).to.equal(true);
+  });
+
+  it("prove_threshold: 30 >= 50 => false", async () => {
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = cipher.encrypt([BigInt(30), BigInt(50)], nonce);
+
+    const ev = awaitEvent("proveThresholdEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .proveThreshold(off, Array.from(ct[0]), Array.from(ct[1]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("prove_threshold", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(e.meetsThreshold).to.equal(false);
+  });
+
+  // reveal_to_auditor
+
+  it("reveal_to_auditor: discloses 77 only to the auditor key", async () => {
+    await initCompDef("reveal_to_auditor", "initRevealToAuditorCompDef");
+    // The "auditor" holds this cipher's key; the owner encrypts under it.
+    const { cipher: auditorCipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    const ct = auditorCipher.encrypt([BigInt(77)], nonce);
+
+    const ev = awaitEvent("auditorRevealEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .revealToAuditor(off, Array.from(ct[0]), Array.from(publicKey),
+        new anchor.BN(deserializeLE(nonce).toString()))
+      .accountsPartial(compAccounts("reveal_to_auditor", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    expect(auditorCipher.decrypt([e.balance], Uint8Array.from(e.nonce))[0]).to.equal(BigInt(77));
+  });
+
+  // batch_transfer
+
+  it("batch_transfer: sender 100 -> [r1=10,r2=20,r3=30] amts [5,10,15]", async () => {
+    await initCompDef("batch_transfer", "initBatchTransferCompDef");
+    const { cipher, publicKey } = newCipher(mxePublicKey);
+    const nonce = randomBytes(16);
+    // sender, r1, r2, r3, a1, a2, a3
+    const ct = cipher.encrypt(
+      [BigInt(100), BigInt(10), BigInt(20), BigInt(30), BigInt(5), BigInt(10), BigInt(15)],
+      nonce,
     );
 
-    [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), mintConfigPda.toBuffer()],
-      program.programId
+    const ev = awaitEvent("batchTransferEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .batchTransfer(
+        off,
+        Array.from(ct[0]), Array.from(ct[1]), Array.from(ct[2]), Array.from(ct[3]),
+        Array.from(ct[4]), Array.from(ct[5]), Array.from(ct[6]),
+        Array.from(publicKey), new anchor.BN(deserializeLE(nonce).toString()),
+      )
+      .accountsPartial(compAccounts("batch_transfer", off))
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    const dec = cipher.decrypt(
+      [e.newSender, e.newR1, e.newR2, e.newR3],
+      Uint8Array.from(e.nonce),
     );
-    [senderBalancePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("balance"), sender.publicKey.toBuffer()],
-      program.programId
+    expect(dec[0]).to.equal(BigInt(70)); // 100 - 30
+    expect(dec[1]).to.equal(BigInt(15)); // 10 + 5
+    expect(dec[2]).to.equal(BigInt(30)); // 20 + 10
+    expect(dec[3]).to.equal(BigInt(45)); // 30 + 15
+  });
+
+  // Stage 3: persistent on-chain Enc<Mxe> balance
+
+  it("persists an on-chain balance: init 0 -> +100 -> +50 -> reveal 150", async () => {
+    await initCompDef("init_balance", "initInitBalanceCompDef");
+    await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
+    await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
+
+    const payer = (provider as anchor.AnchorProvider).wallet.publicKey;
+    // Dummy mint for now (no SPL yet) — just keys the PDA.
+    const mint = anchor.web3.Keypair.generate().publicKey;
+    const [balancePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), payer.toBuffer(), mint.toBuffer()],
+      program.programId,
     );
-    [receiverBalancePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("balance"), receiver.publicKey.toBuffer()],
-      program.programId
+
+    // 1. init_balance -> account created with encrypted 0
+    {
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .initBalance(off)
+        .accountsPartial({
+          mint,
+          confidentialBalance: balancePda,
+          ...compAccounts("init_balance", off),
+        })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // 2. deposit 100, then 50 — each reads the stored ciphertext + writes back
+    for (const amount of [BigInt(100), BigInt(50)]) {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([amount], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({
+          mint,
+          confidentialBalance: balancePda,
+          ...compAccounts("deposit_to_account", off),
+        })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // 3. reveal the persisted balance -> 150
+    const ev = awaitEvent("accountBalanceRevealedEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .revealAccountBalance(off)
+      .accountsPartial({
+        mint,
+        confidentialBalance: balancePda,
+        ...compAccounts("reveal_account_balance", off),
+      })
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    console.log("Persisted on-chain balance revealed:", e.balance.toString());
+    // e.balance is an Anchor BN (u64), not a bigint — compare as strings.
+    expect(e.balance.toString()).to.equal("150");
+  });
+
+  it("spends from a persistent balance: +100 -> overdraft 999 (no-op) -> debit 30 -> reveal 70", async () => {
+    await initCompDef("init_balance", "initInitBalanceCompDef");
+    await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
+    await initCompDef("debit_from_account", "initDebitFromAccountCompDef");
+    await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
+
+    const payer = (provider as anchor.AnchorProvider).wallet.publicKey;
+    const mint = anchor.web3.Keypair.generate().publicKey;
+    const [balancePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), payer.toBuffer(), mint.toBuffer()],
+      program.programId,
     );
-    [closerBalancePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("balance"), closer.publicKey.toBuffer()],
-      program.programId
-    );
-    [depositorBalancePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("balance"), depositor.publicKey.toBuffer()],
-      program.programId
-    );
 
-    senderOwnerCommitment = sha256(sender.publicKey.toBuffer());
-    receiverOwnerCommitment = sha256(receiver.publicKey.toBuffer());
-    closerOwnerCommitment = sha256(closer.publicKey.toBuffer());
-    depositorOwnerCommitment = sha256(depositor.publicKey.toBuffer());
+    // init -> 0
+    {
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .initBalance(off)
+        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("init_balance", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // deposit 100
+    {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([BigInt(100)], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("deposit_to_account", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // debit helper — balance is read from the account, client only provides the amount
+    const debit = async (amount: bigint) => {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([amount], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .debitFromAccount(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("debit_from_account", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    };
+
+    await debit(BigInt(999)); // overdraft: 999 > 100 -> balance unchanged (no-op)
+    await debit(BigInt(30));  // 100 - 30 -> 70
+
+    // reveal -> 70 (proves overdraft was a no-op and the debit applied)
+    const ev = awaitEvent("accountBalanceRevealedEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .revealAccountBalance(off)
+      .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("reveal_account_balance", off) })
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    console.log("Balance after +100, overdraft 999 (no-op), -30:", e.balance.toString());
+    expect(e.balance.toString()).to.equal("70");
   });
 
-  // ── Section 1: initialize_mint ─────────────────────────────────────
+  it("transfers between persistent balances: +100 sender -> transfer 40 -> sender 60 / receiver 40", async () => {
+    await initCompDef("init_balance", "initInitBalanceCompDef");
+    await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
+    await initCompDef("transfer_between_accounts", "initTransferBetweenAccountsCompDef");
+    await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
 
-  describe("initialize_mint", () => {
-    it("creates mint config PDA and SPL mint successfully", async () => {
+    const sender = (provider as anchor.AnchorProvider).wallet.publicKey;
+    const receiverKp = anchor.web3.Keypair.generate();
+    const receiver = receiverKp.publicKey;
+    const mint = anchor.web3.Keypair.generate().publicKey;
+
+    // fund the receiver so it can pay rent for its own balance account
+    const air = await provider.connection.requestAirdrop(receiver, 1_000_000_000);
+    await provider.connection.confirmTransaction(air, "confirmed");
+
+    const [senderBal] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), sender.toBuffer(), mint.toBuffer()], program.programId);
+    const [receiverBal] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), receiver.toBuffer(), mint.toBuffer()], program.programId);
+
+    const initBal = async (bal: PublicKey, ownerKp?: anchor.web3.Keypair) => {
+      const off = new anchor.BN(randomBytes(8), "hex");
+      let m = program.methods.initBalance(off).accountsPartial({
+        payer: ownerKp ? ownerKp.publicKey : sender, mint,
+        confidentialBalance: bal, ...compAccounts("init_balance", off),
+      });
+      if (ownerKp) m = m.signers([ownerKp]);
+      await m.rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    };
+    await initBal(senderBal);
+    await initBal(receiverBal, receiverKp);
+
+    // deposit 100 to sender
+    {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([BigInt(100)], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
       await program.methods
-        .initializeMint()
-        .accounts({
-          mintConfig: mintConfigPda,
-          mint: mintKeypair.publicKey,
-          authority: authority.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        })
-        .signers([mintKeypair])
-        .rpc();
+        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({ mint, confidentialBalance: senderBal, ...compAccounts("deposit_to_account", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
 
-      const cfg = await program.account.mintConfig.fetch(mintConfigPda);
-      assert.ok(cfg.authority.equals(authority.publicKey));
-      assert.ok(cfg.mint.equals(mintKeypair.publicKey));
-      assert.equal(cfg.totalDeposited.toNumber(), 0);
-      assert.equal(cfg.totalWithdrawn.toNumber(), 0);
-    });
-
-    it("fails when called a second time (PDA already in use)", async () => {
-      try {
-        const dupe = Keypair.generate();
-        await program.methods
-          .initializeMint()
-          .accounts({
-            mintConfig: mintConfigPda,
-            mint: dupe.publicKey,
-            authority: authority.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-          })
-          .signers([dupe])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
-  });
-
-  // ── Section 2: init_balance ────────────────────────────────────────
-
-  describe("init_balance", () => {
-    it("creates sender confidential balance", async () => {
+    // transfer 40 sender -> receiver (sender signs; both balances read on-chain)
+    {
+      const { cipher, publicKey } = newCipher(mxePublicKey);
+      const nonce = randomBytes(16);
+      const ct = cipher.encrypt([BigInt(40)], nonce);
+      const off = new anchor.BN(randomBytes(8), "hex");
       await program.methods
-        .initBalance([...senderOwnerCommitment] as any)
-        .accounts({
-          confidentialBalance: senderBalancePda,
-          owner: sender.publicKey,
-          systemProgram: anchor.web3.SystemProgram.programId,
+        .transferBetweenAccounts(off, Array.from(ct[0]), Array.from(publicKey),
+          new anchor.BN(deserializeLE(nonce).toString()))
+        .accountsPartial({
+          mint, receiver, senderBalance: senderBal, receiverBalance: receiverBal,
+          ...compAccounts("transfer_between_accounts", off),
         })
-        .signers([sender])
-        .rpc();
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
 
-      const bal = await program.account.confidentialBalance.fetch(
-        senderBalancePda
-      );
-      assert.ok(bal.owner.equals(sender.publicKey));
-      assert.equal(bal.nonce.toNumber(), 0);
-      assert.deepEqual([...bal.encryptedBalance], [...ZERO_64]);
-      assert.deepEqual([...bal.pendingBalance], [...ZERO_64]);
-      assert.equal(bal.isFrozen, false);
-    });
-
-    it("creates receiver confidential balance", async () => {
-      await program.methods
-        .initBalance([...receiverOwnerCommitment] as any)
-        .accounts({
-          confidentialBalance: receiverBalancePda,
-          owner: receiver.publicKey,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([receiver])
-        .rpc();
-
-      const bal = await program.account.confidentialBalance.fetch(
-        receiverBalancePda
-      );
-      assert.ok(bal.owner.equals(receiver.publicKey));
-      assert.equal(bal.nonce.toNumber(), 0);
-    });
-
-    it("creates closer confidential balance (used for close_account test)", async () => {
-      await program.methods
-        .initBalance([...closerOwnerCommitment] as any)
-        .accounts({
-          confidentialBalance: closerBalancePda,
-          owner: closer.publicKey,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([closer])
-        .rpc();
-
-      const bal = await program.account.confidentialBalance.fetch(
-        closerBalancePda
-      );
-      assert.ok(bal.owner.equals(closer.publicKey));
-    });
-
-    it("fails when called twice for the same owner", async () => {
-      try {
-        await program.methods
-          .initBalance([...senderOwnerCommitment] as any)
-          .accounts({
-            confidentialBalance: senderBalancePda,
-            owner: sender.publicKey,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([sender])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
-
-    it("fails with all-zero owner_commitment (InvalidCommitment)", async () => {
-      const fresh = Keypair.generate();
-      await airdrop(fresh.publicKey, 1);
-      const [freshPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("balance"), fresh.publicKey.toBuffer()],
-        program.programId
-      );
-      try {
-        await program.methods
-          .initBalance([...Buffer.alloc(32, 0)] as any)
-          .accounts({
-            confidentialBalance: freshPda,
-            owner: fresh.publicKey,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([fresh])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("InvalidCommitment") ||
-            e.toString().includes("custom program error")
-        );
-      }
-    });
-  });
-
-  // ── Section 3: private_transfer ────────────────────────────────────
-
-  describe("private_transfer", () => {
-    it("executes first transfer (nonce=0), XORs pending balance correctly", async () => {
-      const encAmt = Buffer.alloc(64, 0x07);
-      const senderNewBal = Buffer.alloc(64, 0x03);
-      const encTag = Buffer.alloc(64, 0x09);
-      const commitHash = transferCommitment(encAmt, 0, receiverOwnerCommitment);
-
-      await program.methods
-        .privateTransfer(
-          [...encAmt] as any,
-          [...senderNewBal] as any,
-          [...commitHash] as any,
-          [...encTag] as any,
-          new anchor.BN(0)
-        )
-        .accounts({
-          senderBalance: senderBalancePda,
-          receiverBalance: receiverBalancePda,
-          sender: sender.publicKey,
-        })
-        .signers([sender])
-        .rpc();
-
-      const sbal = await program.account.confidentialBalance.fetch(
-        senderBalancePda
-      );
-      const rbal = await program.account.confidentialBalance.fetch(
-        receiverBalancePda
-      );
-
-      assert.equal(sbal.nonce.toNumber(), 1);
-      assert.deepEqual([...sbal.encryptedBalance], [...senderNewBal]);
-      assert.deepEqual([...rbal.pendingBalance], [...encAmt]);
-    });
-
-    it("fails with wrong nonce (replay attack)", async () => {
-      try {
-        const encAmt = Buffer.alloc(64, 0x05);
-        const senderNewBal = Buffer.alloc(64, 0x01);
-        const encTag = Buffer.alloc(64, 0x02);
-        const commitHash = transferCommitment(encAmt, 0, receiverOwnerCommitment);
-        await program.methods
-          .privateTransfer(
-            [...encAmt] as any,
-            [...senderNewBal] as any,
-            [...commitHash] as any,
-            [...encTag] as any,
-            new anchor.BN(0)
-          )
-          .accounts({
-            senderBalance: senderBalancePda,
-            receiverBalance: receiverBalancePda,
-            sender: sender.publicKey,
-          })
-          .signers([sender])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("InvalidNonce") ||
-            e.toString().includes("custom program error")
-        );
-      }
-    });
-
-    it("fails with invalid commitment_hash", async () => {
-      try {
-        const encAmt = Buffer.alloc(64, 0x05);
-        const senderNewBal = Buffer.alloc(64, 0x01);
-        const encTag = Buffer.alloc(64, 0x02);
-        const badCommit = Buffer.alloc(32, 0xff);
-        await program.methods
-          .privateTransfer(
-            [...encAmt] as any,
-            [...senderNewBal] as any,
-            [...badCommit] as any,
-            [...encTag] as any,
-            new anchor.BN(1)
-          )
-          .accounts({
-            senderBalance: senderBalancePda,
-            receiverBalance: receiverBalancePda,
-            sender: sender.publicKey,
-          })
-          .signers([sender])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("InvalidCommitment") ||
-            e.toString().includes("custom program error")
-        );
-      }
-    });
-
-    it("fails on self-transfer (SelfTransfer)", async () => {
-      try {
-        const encAmt = Buffer.alloc(64, 0x05);
-        const senderNewBal = Buffer.alloc(64, 0x01);
-        const encTag = Buffer.alloc(64, 0x02);
-        const commitHash = transferCommitment(encAmt, 1, senderOwnerCommitment);
-        await program.methods
-          .privateTransfer(
-            [...encAmt] as any,
-            [...senderNewBal] as any,
-            [...commitHash] as any,
-            [...encTag] as any,
-            new anchor.BN(1)
-          )
-          .accounts({
-            senderBalance: senderBalancePda,
-            receiverBalance: senderBalancePda,
-            sender: sender.publicKey,
-          })
-          .signers([sender])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
-
-    it("fails when signer does not match sender_balance owner", async () => {
-      try {
-        const encAmt = Buffer.alloc(64, 0x05);
-        const senderNewBal = Buffer.alloc(64, 0x01);
-        const encTag = Buffer.alloc(64, 0x02);
-        const commitHash = transferCommitment(encAmt, 1, receiverOwnerCommitment);
-        await program.methods
-          .privateTransfer(
-            [...encAmt] as any,
-            [...senderNewBal] as any,
-            [...commitHash] as any,
-            [...encTag] as any,
-            new anchor.BN(1)
-          )
-          .accounts({
-            senderBalance: senderBalancePda,
-            receiverBalance: receiverBalancePda,
-            sender: receiver.publicKey,
-          })
-          .signers([receiver])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
-
-    it("executes second transfer (nonce=1) successfully", async () => {
-      const encAmt = Buffer.alloc(64, 0x0b);
-      const senderNewBal = Buffer.alloc(64, 0x04);
-      const encTag = Buffer.alloc(64, 0x0d);
-      const commitHash = transferCommitment(encAmt, 1, receiverOwnerCommitment);
-
-      await program.methods
-        .privateTransfer(
-          [...encAmt] as any,
-          [...senderNewBal] as any,
-          [...commitHash] as any,
-          [...encTag] as any,
-          new anchor.BN(1)
-        )
-        .accounts({
-          senderBalance: senderBalancePda,
-          receiverBalance: receiverBalancePda,
-          sender: sender.publicKey,
-        })
-        .signers([sender])
-        .rpc();
-
-      const sbal = await program.account.confidentialBalance.fetch(
-        senderBalancePda
-      );
-      assert.equal(sbal.nonce.toNumber(), 2);
-    });
-  });
-
-  // ── Section 4: apply_pending_balance ──────────────────────────────
-
-  describe("apply_pending_balance", () => {
-    it("merges pending balance into encrypted balance and zeros pending", async () => {
-      const newEncBal = Buffer.alloc(64, 0xaa);
-      const newCommit = sha256(Buffer.alloc(32, 0xbb));
-
-      await program.methods
-        .applyPendingBalance(
-          [...newEncBal] as any,
-          [...newCommit] as any
-        )
-        .accounts({
-          confidentialBalance: receiverBalancePda,
-          owner: receiver.publicKey,
-        })
-        .signers([receiver])
-        .rpc();
-
-      const bal = await program.account.confidentialBalance.fetch(
-        receiverBalancePda
-      );
-      assert.deepEqual([...bal.encryptedBalance], [...newEncBal]);
-      assert.deepEqual([...bal.pendingBalance], [...ZERO_64]);
-    });
-  });
-
-  // ── Section 5: close_account ──────────────────────────────────────
-
-  describe("close_account", () => {
-    it("fails when encrypted_balance is non-zero (BalanceNotZero)", async () => {
-      try {
-        await program.methods
-          .closeAccount()
-          .accounts({
-            confidentialBalance: senderBalancePda,
-            owner: sender.publicKey,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([sender])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("BalanceNotZero") ||
-            e.toString().includes("custom program error")
-        );
-      }
-    });
-
-    it("closes account with zero balance, refunds rent to owner", async () => {
-      const lamportsBefore = await provider.connection.getBalance(
-        closer.publicKey
-      );
-
-      await program.methods
-        .closeAccount()
-        .accounts({
-          confidentialBalance: closerBalancePda,
-          owner: closer.publicKey,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([closer])
-        .rpc();
-
-      const lamportsAfter = await provider.connection.getBalance(
-        closer.publicKey
-      );
-      assert.ok(lamportsAfter > lamportsBefore, "rent should be refunded");
-
-      try {
-        await program.account.confidentialBalance.fetch(closerBalancePda);
-        assert.fail("account should no longer exist");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
-  });
-
-  // ── Section 6: batch_transfer ─────────────────────────────────────
-
-  describe("batch_transfer", () => {
-    it("fails when more than 5 recipients provided (TooManyRecipients)", async () => {
-      const sixTransfers = Array.from({ length: 6 }, () => ({
-        encryptedAmount: [...Buffer.alloc(64, 1)],
-        commitmentHash: [...Buffer.alloc(32, 0)],
-        encryptedReceiverTag: [...Buffer.alloc(64, 0)],
-      }));
-
-      try {
-        await program.methods
-          .batchTransfer(
-            sixTransfers as any,
-            [...Buffer.alloc(64, 0)] as any,
-            new anchor.BN(2)
-          )
-          .accounts({
-            senderBalance: senderBalancePda,
-            sender: sender.publicKey,
-          })
-          .remainingAccounts([])
-          .signers([sender])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
-
-    it("executes single-recipient batch transfer successfully", async () => {
-      const senderNonce = 2;
-      const encAmt = Buffer.alloc(64, 0x33);
-      const encTag = Buffer.alloc(64, 0x44);
-      const senderNewBal = Buffer.alloc(64, 0x55);
-      const commitHash = transferCommitment(
-        encAmt,
-        senderNonce,
-        receiverOwnerCommitment
-      );
-
-      await program.methods
-        .batchTransfer(
-          [
-            {
-              encryptedAmount: [...encAmt] as any,
-              commitmentHash: [...commitHash] as any,
-              encryptedReceiverTag: [...encTag] as any,
-            },
-          ] as any,
-          [...senderNewBal] as any,
-          new anchor.BN(senderNonce)
-        )
-        .accounts({
-          senderBalance: senderBalancePda,
-          sender: sender.publicKey,
-        })
-        .remainingAccounts([
-          { pubkey: receiverBalancePda, isWritable: true, isSigner: false },
-        ])
-        .signers([sender])
-        .rpc();
-
-      const sbal = await program.account.confidentialBalance.fetch(
-        senderBalancePda
-      );
-      assert.equal(sbal.nonce.toNumber(), 3);
-      assert.deepEqual([...sbal.encryptedBalance], [...senderNewBal]);
-
-      const rbal = await program.account.confidentialBalance.fetch(
-        receiverBalancePda
-      );
-      assert.deepEqual([...rbal.pendingBalance], [...encAmt]);
-    });
-  });
-
-  // ── Section 7: deposit ────────────────────────────────────────────
-
-  describe("deposit", () => {
-    before("create depositor balance account and fund ATA with tokens", async () => {
-      // Create confidential balance for depositor
-      await program.methods
-        .initBalance([...depositorOwnerCommitment] as any)
-        .accounts({
-          confidentialBalance: depositorBalancePda,
-          owner: depositor.publicKey,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([depositor])
-        .rpc();
-
-      // Create depositor's ATA for the VeilPay mint
-      depositorAta = await createAssociatedTokenAccount(
-        provider.connection,
-        depositor,            // fee payer
-        mintKeypair.publicKey,
-        depositor.publicKey
-      );
-
-      // Mint 10,000 tokens to depositor's ATA and wait for confirmed state
-      const mintSig = await mintTo(
-        provider.connection,
-        authority.payer,      // transaction signer (NodeWallet exposes .payer)
-        mintKeypair.publicKey,
-        depositorAta,
-        authority.publicKey,  // mint authority (set to `authority` in initialize_mint)
-        TOKENS(10_000)
-      );
-      await provider.connection.confirmTransaction(mintSig, "confirmed");
-    });
-
-    it("deposits tokens into vault and updates encrypted balance", async () => {
-      const amount = TOKENS(1_000);
-      const newEncBal = Buffer.alloc(64, 0x11);
-      const balCommit = sha256(Buffer.alloc(32, 0x22));
-
-      await program.methods
-        .deposit(
-          new anchor.BN(amount),
-          [...newEncBal] as any,
-          [...balCommit] as any
-        )
-        .accounts({
-          confidentialBalance: depositorBalancePda,
-          owner: depositor.publicKey,
-          ownerTokenAccount: depositorAta,
-          vault: vaultPda,
-          mintConfig: mintConfigPda,
-          mint: mintKeypair.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([depositor])
-        .rpc();
-
-      // Verify program-side state (always consistent, no RPC lag)
-      const bal = await program.account.confidentialBalance.fetch(
-        depositorBalancePda
-      );
-      assert.equal(bal.depositCount.toNumber(), 1);
-      assert.deepEqual([...bal.encryptedBalance], [...newEncBal]);
-
-      const cfg = await program.account.mintConfig.fetch(mintConfigPda);
-      assert.equal(cfg.totalDeposited.toNumber(), amount);
-      // Token account balances verified implicitly by the withdraw tests below
-    });
-
-    it("fails if deposit amount is zero (InvalidAmount)", async () => {
-      try {
-        await program.methods
-          .deposit(
-            new anchor.BN(0),
-            [...Buffer.alloc(64, 0)] as any,
-            [...Buffer.alloc(32, 0)] as any
-          )
-          .accounts({
-            confidentialBalance: depositorBalancePda,
-            owner: depositor.publicKey,
-            ownerTokenAccount: depositorAta,
-            vault: vaultPda,
-            mintConfig: mintConfigPda,
-            mint: mintKeypair.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([depositor])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("InvalidAmount") ||
-            e.toString().includes("custom program error")
-        );
-      }
-    });
-
-    it("fails if owner has insufficient token balance (InsufficientFunds)", async () => {
-      const tooMuch = new anchor.BN(TOKENS(999_999));
-      try {
-        await program.methods
-          .deposit(
-            tooMuch,
-            [...Buffer.alloc(64, 0)] as any,
-            [...Buffer.alloc(32, 0)] as any
-          )
-          .accounts({
-            confidentialBalance: depositorBalancePda,
-            owner: depositor.publicKey,
-            ownerTokenAccount: depositorAta,
-            vault: vaultPda,
-            mintConfig: mintConfigPda,
-            mint: mintKeypair.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([depositor])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("InsufficientFunds") ||
-            e.toString().includes("custom program error") ||
-            e.toString().includes("insufficient funds")
-        );
-      }
-    });
-
-    it("fails if mint does not match mint_config (InvalidMint)", async () => {
-      const wrongMint = Keypair.generate().publicKey;
-      try {
-        await program.methods
-          .deposit(
-            new anchor.BN(TOKENS(100)),
-            [...Buffer.alloc(64, 0)] as any,
-            [...Buffer.alloc(32, 0)] as any
-          )
-          .accounts({
-            confidentialBalance: depositorBalancePda,
-            owner: depositor.publicKey,
-            ownerTokenAccount: depositorAta,
-            vault: vaultPda,
-            mintConfig: mintConfigPda,
-            mint: wrongMint,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([depositor])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
-  });
-
-  // ── Section 8: withdraw ───────────────────────────────────────────
-
-  describe("withdraw", () => {
-    // After deposit tests: vault has 1,000 tokens, depositor nonce = 0
-
-    it("withdraws tokens from vault with valid withdrawal proof", async () => {
-      const amount = TOKENS(500);
-      const newEncBal = Buffer.alloc(64, 0x33);
-      const balCommit = sha256(Buffer.alloc(32, 0x44));
-
-      // depositor nonce is 0 (deposit doesn't change nonce)
-      const proof = withdrawalProof(depositorOwnerCommitment, amount, 0);
-
-      const ownerBefore = await getAccount(provider.connection, depositorAta);
-      const vaultBefore = await getAccount(provider.connection, vaultPda);
-
-      await program.methods
-        .withdraw(
-          new anchor.BN(amount),
-          [...newEncBal] as any,
-          [...balCommit] as any,
-          [...proof] as any
-        )
-        .accounts({
-          confidentialBalance: depositorBalancePda,
-          owner: depositor.publicKey,
-          ownerTokenAccount: depositorAta,
-          vault: vaultPda,
-          mintConfig: mintConfigPda,
-          mint: mintKeypair.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([depositor])
-        .rpc();
-
-      const ownerAfter = await getAccount(provider.connection, depositorAta);
-      const vaultAfter = await getAccount(provider.connection, vaultPda);
-
-      assert.equal(
-        Number(ownerAfter.amount),
-        Number(ownerBefore.amount) + amount
-      );
-      assert.equal(
-        Number(vaultAfter.amount),
-        Number(vaultBefore.amount) - amount
-      );
-
-      const bal = await program.account.confidentialBalance.fetch(
-        depositorBalancePda
-      );
-      assert.equal(bal.withdrawCount.toNumber(), 1);
-      assert.equal(bal.nonce.toNumber(), 1);
-      assert.deepEqual([...bal.encryptedBalance], [...newEncBal]);
-
-      const cfg = await program.account.mintConfig.fetch(mintConfigPda);
-      assert.equal(cfg.totalWithdrawn.toNumber(), amount);
-    });
-
-    it("fails with invalid withdrawal proof (InvalidWithdrawalProof)", async () => {
-      const badProof = Buffer.alloc(32, 0xff);
-      try {
-        await program.methods
-          .withdraw(
-            new anchor.BN(TOKENS(100)),
-            [...Buffer.alloc(64, 0)] as any,
-            [...Buffer.alloc(32, 0)] as any,
-            [...badProof] as any
-          )
-          .accounts({
-            confidentialBalance: depositorBalancePda,
-            owner: depositor.publicKey,
-            ownerTokenAccount: depositorAta,
-            vault: vaultPda,
-            mintConfig: mintConfigPda,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([depositor])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("InvalidWithdrawalProof") ||
-            e.toString().includes("custom program error")
-        );
-      }
-    });
-
-    it("fails if withdraw amount is zero (InvalidAmount)", async () => {
-      // nonce is now 1 after the successful withdrawal
-      const proof = withdrawalProof(depositorOwnerCommitment, 0, 1);
-      try {
-        await program.methods
-          .withdraw(
-            new anchor.BN(0),
-            [...Buffer.alloc(64, 0)] as any,
-            [...Buffer.alloc(32, 0)] as any,
-            [...proof] as any
-          )
-          .accounts({
-            confidentialBalance: depositorBalancePda,
-            owner: depositor.publicKey,
-            ownerTokenAccount: depositorAta,
-            vault: vaultPda,
-            mintConfig: mintConfigPda,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([depositor])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (e: any) {
-        assert.ok(
-          e.toString().includes("InvalidAmount") ||
-            e.toString().includes("custom program error")
-        );
-      }
-    });
-
-    it("fails if vault has insufficient funds", async () => {
-      // vault has 500 tokens remaining; try to withdraw 999,999
-      const amount = TOKENS(999_999);
-      const proof = withdrawalProof(depositorOwnerCommitment, amount, 1);
-      try {
-        await program.methods
-          .withdraw(
-            new anchor.BN(amount),
-            [...Buffer.alloc(64, 0)] as any,
-            [...Buffer.alloc(32, 0)] as any,
-            [...proof] as any
-          )
-          .accounts({
-            confidentialBalance: depositorBalancePda,
-            owner: depositor.publicKey,
-            ownerTokenAccount: depositorAta,
-            vault: vaultPda,
-            mintConfig: mintConfigPda,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-          })
-          .signers([depositor])
-          .rpc();
-        assert.fail("should have thrown");
-      } catch (_) {
-        assert.ok(true);
-      }
-    });
+    const reveal = async (bal: PublicKey, ownerKp?: anchor.web3.Keypair) => {
+      const ev = awaitEvent("accountBalanceRevealedEvent");
+      const off = new anchor.BN(randomBytes(8), "hex");
+      let m = program.methods.revealAccountBalance(off).accountsPartial({
+        payer: ownerKp ? ownerKp.publicKey : sender, mint,
+        confidentialBalance: bal, ...compAccounts("reveal_account_balance", off),
+      });
+      if (ownerKp) m = m.signers([ownerKp]);
+      await m.rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+      return (await ev).balance.toString();
+    };
+    const senderAfter = await reveal(senderBal);
+    const receiverAfter = await reveal(receiverBal, receiverKp);
+    console.log("after transfer 40 -> sender:", senderAfter, "receiver:", receiverAfter);
+    expect(senderAfter).to.equal("60");
+    expect(receiverAfter).to.equal("40");
   });
 });
+
+async function getMXEPublicKeyWithRetry(
+  provider: anchor.AnchorProvider,
+  programId: PublicKey,
+  // Fresh keygen (without a cached MXE) can take several minutes on a 2-node
+  // localnet before the MXE x25519 pubkey is published — wait up to 5 minutes.
+  maxRetries: number = 300,
+  retryDelayMs: number = 1000,
+): Promise<Uint8Array> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const mxePublicKey = await getMXEPublicKey(provider, programId);
+      if (mxePublicKey) return mxePublicKey;
+    } catch (_) {
+      // not ready yet
+    }
+    if (attempt < maxRetries) {
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    }
+  }
+  throw new Error(`Failed to fetch MXE public key after ${maxRetries} attempts`);
+}
+
+function readKpJson(path: string): anchor.web3.Keypair {
+  const file = fs.readFileSync(path);
+  return anchor.web3.Keypair.fromSecretKey(
+    new Uint8Array(JSON.parse(file.toString())),
+  );
+}

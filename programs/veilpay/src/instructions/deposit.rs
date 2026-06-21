@@ -1,96 +1,80 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use arcium_anchor::prelude::*;
 
-use crate::errors::VeilPayError;
-use crate::events::DepositMade;
-use crate::state::{ConfidentialBalance, MintConfig};
+use crate::{ArciumSignerAccount, ID, ID_CONST};
+use crate::constants::COMP_DEF_OFFSET_DEPOSIT;
 
+#[queue_computation_accounts("deposit", payer)]
 #[derive(Accounts)]
+#[instruction(computation_offset: u64)]
 pub struct Deposit<'info> {
-    #[account(
-        mut,
-        seeds = [b"balance", owner.key().as_ref()],
-        bump = confidential_balance.bump,
-        constraint = confidential_balance.owner == owner.key() @ VeilPayError::Unauthorized,
-        constraint = !confidential_balance.is_frozen @ VeilPayError::AccountFrozen,
-    )]
-    pub confidential_balance: Account<'info, ConfidentialBalance>,
-
     #[account(mut)]
-    pub owner: Signer<'info>,
-
-    #[account(
-        mut,
-        constraint = owner_token_account.owner == owner.key() @ VeilPayError::Unauthorized,
-        constraint = owner_token_account.mint == mint_config.mint @ VeilPayError::InvalidMint,
-    )]
-    pub owner_token_account: Account<'info, TokenAccount>,
-
+    pub payer: Signer<'info>,
     #[account(
         init_if_needed,
-        payer = owner,
-        seeds = [b"vault", mint_config.key().as_ref()],
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
         bump,
-        token::mint = mint,
-        token::authority = mint_config,
+        address = derive_sign_pda!(),
     )]
-    pub vault: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        seeds = [b"mint_config", mint.key().as_ref()],
-        bump = mint_config.bump,
-    )]
-    pub mint_config: Account<'info, MintConfig>,
-
-    #[account(constraint = mint.key() == mint_config.mint @ VeilPayError::InvalidMint)]
-    pub mint: Account<'info, Mint>,
-
-    pub token_program: Program<'info, Token>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: mempool_account, checked by the arcium program.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: executing_pool, checked by the arcium program.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: computation_account, checked by the arcium program.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_DEPOSIT))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
     pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
 }
 
-pub fn handler(
-    ctx: Context<Deposit>,
-    amount: u64,
-    new_encrypted_balance: [u8; 64],
-    balance_commitment: [u8; 32],
-) -> Result<()> {
-    require!(amount > 0, VeilPayError::InvalidAmount);
-    require!(
-        ctx.accounts.owner_token_account.amount >= amount,
-        VeilPayError::InsufficientFunds
-    );
+#[callback_accounts("deposit")]
+#[derive(Accounts)]
+pub struct DepositCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_DEPOSIT))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: instructions_sysvar, checked by the account constraint
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
 
-    let cpi_ctx = CpiContext::new(
-        ctx.accounts.token_program.to_account_info(),
-        Transfer {
-            from: ctx.accounts.owner_token_account.to_account_info(),
-            to: ctx.accounts.vault.to_account_info(),
-            authority: ctx.accounts.owner.to_account_info(),
-        },
-    );
-    token::transfer(cpi_ctx, amount)?;
-
-    let balance = &mut ctx.accounts.confidential_balance;
-    balance.encrypted_balance = new_encrypted_balance;
-    balance.deposit_count = balance
-        .deposit_count
-        .checked_add(1)
-        .ok_or(VeilPayError::Overflow)?;
-
-    let mint_config = &mut ctx.accounts.mint_config;
-    mint_config.total_deposited = mint_config
-        .total_deposited
-        .checked_add(amount)
-        .ok_or(VeilPayError::Overflow)?;
-
-    emit!(DepositMade {
-        owner: ctx.accounts.owner.key(),
-        balance_commitment,
-        deposit_index: balance.deposit_count,
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
-    Ok(())
+#[init_computation_definition_accounts("deposit", payer)]
+#[derive(Accounts)]
+pub struct InitDepositCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program. Not initialized yet.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
 }

@@ -1,21 +1,21 @@
-#![allow(ambiguous_glob_reexports)]
-
-pub mod apply_pending_balance;
 pub mod batch_transfer;
-pub mod close_account;
+pub mod confidential_balance;
+pub mod debit;
 pub mod deposit;
-pub mod init_balance;
-pub mod initialize_existing_mint;
-pub mod initialize_mint;
-pub mod private_transfer;
+pub mod prove_threshold;
+pub mod reveal_to_auditor;
+pub mod transfer;
+pub mod vault;
+pub mod view_balance;
 pub mod withdraw;
 
-pub use apply_pending_balance::*;
 pub use batch_transfer::*;
-pub use close_account::*;
+pub use confidential_balance::*;
+pub use debit::*;
 pub use deposit::*;
-pub use init_balance::*;
-pub use initialize_existing_mint::*;
-pub use initialize_mint::*;
-pub use private_transfer::*;
+pub use prove_threshold::*;
+pub use reveal_to_auditor::*;
+pub use transfer::*;
+pub use vault::*;
+pub use view_balance::*;
 pub use withdraw::*;

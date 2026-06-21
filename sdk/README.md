@@ -116,13 +116,13 @@ import { ensureCompDefs } from "@veilpay/sdk/admin";
 import { buildContext } from "@veilpay/sdk";
 
 const ctx = buildContext({ connection, wallet });
-await ensureCompDefs(ctx, "/path/to/arcium-mpc/build", (c, s) => console.log(c, s));
+await ensureCompDefs(ctx, "/path/to/veilpay/build", (c, s) => console.log(c, s));
 ```
 
 ## Develop
 
 ```bash
-npm run sync-idl   # re-vendor IDL + types from ../arcium-mpc/target after a program build
+npm run sync-idl   # re-vendor IDL + types from ../target after a program build
 npm run typecheck
 npm run test       # cluster-independent unit tests (crypto, PDAs, validation, errors)
 npm run build      # dual ESM + CJS + .d.ts via tsup

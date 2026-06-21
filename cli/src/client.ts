@@ -8,7 +8,7 @@ import * as path from "path";
 export const REPO_ROOT = path.resolve(__dirname, "..", "..");
 
 /** Directory holding the compiled `<circuit>.arcis` bytecode (the program's build/). */
-export const BUILD_DIR = path.join(REPO_ROOT, "arcium-mpc", "build");
+export const BUILD_DIR = path.join(REPO_ROOT, "build");
 
 /** Global CLI options (flags override env). */
 export interface GlobalOpts {

@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const target = resolve(here, "..", "..", "arcium-mpc", "target");
+const target = resolve(here, "..", "..", "target");
 const dest = resolve(here, "..", "src", "idl");
 
 const files = [

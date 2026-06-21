@@ -1,108 +1,80 @@
 use anchor_lang::prelude::*;
+use arcium_anchor::prelude::*;
 
-use crate::errors::VeilPayError;
-use crate::events::{BatchTransferMade, PrivateTransferMade};
-use crate::state::ConfidentialBalance;
-use crate::utils::{transfer_commitment, xor_64};
+use crate::{ArciumSignerAccount, ID, ID_CONST};
+use crate::constants::COMP_DEF_OFFSET_BATCH_TRANSFER;
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct BatchTransferParams {
-    pub encrypted_amount: [u8; 64],
-    pub commitment_hash: [u8; 32],
-    pub encrypted_receiver_tag: [u8; 64],
-}
-
+#[queue_computation_accounts("batch_transfer", payer)]
 #[derive(Accounts)]
+#[instruction(computation_offset: u64)]
 pub struct BatchTransfer<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
     #[account(
-        mut,
-        seeds = [b"balance", sender.key().as_ref()],
-        bump = sender_balance.bump,
-        constraint = sender_balance.owner == sender.key() @ VeilPayError::Unauthorized,
-        constraint = !sender_balance.is_frozen @ VeilPayError::AccountFrozen,
+        init_if_needed,
+        space = 9,
+        payer = payer,
+        seeds = [&SIGN_PDA_SEED],
+        bump,
+        address = derive_sign_pda!(),
     )]
-    pub sender_balance: Account<'info, ConfidentialBalance>,
-
-    pub sender: Signer<'info>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut, address = derive_mempool_pda!(mxe_account))]
+    /// CHECK: mempool_account, checked by the arcium program.
+    pub mempool_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_execpool_pda!(mxe_account))]
+    /// CHECK: executing_pool, checked by the arcium program.
+    pub executing_pool: UncheckedAccount<'info>,
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: computation_account, checked by the arcium program.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_BATCH_TRANSFER))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+    #[account(mut, address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Account<'info, FeePool>,
+    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
 }
 
-pub fn handler(
-    ctx: Context<BatchTransfer>,
-    transfers: Vec<BatchTransferParams>,
-    sender_new_encrypted_balance: [u8; 64],
-    sender_nonce: u64,
-) -> Result<()> {
-    require!(transfers.len() <= 5, VeilPayError::TooManyRecipients);
-    require!(
-        transfers.len() == ctx.remaining_accounts.len(),
-        VeilPayError::AccountMismatch
-    );
-    require!(
-        sender_nonce == ctx.accounts.sender_balance.nonce,
-        VeilPayError::InvalidNonce
-    );
+#[callback_accounts("batch_transfer")]
+#[derive(Accounts)]
+pub struct BatchTransferCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_BATCH_TRANSFER))]
+    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Account<'info, MXEAccount>,
+    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
+    pub computation_account: UncheckedAccount<'info>,
+    #[account(address = derive_cluster_pda!(mxe_account))]
+    pub cluster_account: Account<'info, Cluster>,
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
+    /// CHECK: instructions_sysvar, checked by the account constraint
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
 
-    let clock = Clock::get()?;
-    let program_id = crate::ID;
-
-    for (transfer_params, receiver_account_info) in
-        transfers.iter().zip(ctx.remaining_accounts.iter())
-    {
-        let mut receiver_data = receiver_account_info.try_borrow_mut_data()?;
-        let mut receiver: ConfidentialBalance =
-            ConfidentialBalance::try_deserialize(&mut receiver_data.as_ref())?;
-
-        let expected_pda = Pubkey::create_program_address(
-            &[
-                b"balance",
-                receiver.owner.as_ref(),
-                &[receiver.bump],
-            ],
-            &program_id,
-        )
-        .map_err(|_| VeilPayError::InvalidCommitment)?;
-        require!(
-            expected_pda == receiver_account_info.key(),
-            VeilPayError::Unauthorized
-        );
-        require!(!receiver.is_frozen, VeilPayError::AccountFrozen);
-
-        let expected_commitment = transfer_commitment(
-            &transfer_params.encrypted_amount,
-            sender_nonce,
-            &receiver.owner_commitment,
-        );
-        require!(
-            expected_commitment == transfer_params.commitment_hash,
-            VeilPayError::InvalidCommitment
-        );
-
-        receiver.pending_balance =
-            xor_64(receiver.pending_balance, transfer_params.encrypted_amount);
-
-        ConfidentialBalance::try_serialize(&receiver, &mut *receiver_data)?;
-
-        emit!(PrivateTransferMade {
-            commitment_hash: transfer_params.commitment_hash,
-            encrypted_receiver_tag: transfer_params.encrypted_receiver_tag,
-            slot: clock.slot,
-            timestamp: clock.unix_timestamp,
-        });
-    }
-
-    let sender = &mut ctx.accounts.sender_balance;
-    sender.encrypted_balance = sender_new_encrypted_balance;
-    sender.nonce = sender
-        .nonce
-        .checked_add(1)
-        .ok_or(VeilPayError::Overflow)?;
-
-    emit!(BatchTransferMade {
-        sender_commitment: sender.owner_commitment,
-        recipient_count: transfers.len() as u8,
-        slot: clock.slot,
-        timestamp: clock.unix_timestamp,
-    });
-
-    Ok(())
+#[init_computation_definition_accounts("batch_transfer", payer)]
+#[derive(Accounts)]
+pub struct InitBatchTransferCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program. Not initialized yet.
+    pub comp_def_account: UncheckedAccount<'info>,
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
 }
