@@ -3,6 +3,19 @@
   "version": "0.1.0",
   "description": "TypeScript client for VeilPay — confidential token payments on Solana via Arcium MPC",
   "license": "MIT",
+  "author": "Mit Gajera",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mitgajera/veilpay.git",
+    "directory": "sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/mitgajera/veilpay/issues"
+  },
+  "homepage": "https://github.com/mitgajera/veilpay/tree/main/sdk#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.cjs",
@@ -37,6 +50,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
     "sync-idl": "node ./scripts/sync-idl.mjs",
     "prepublishOnly": "npm run build"
   },
@@ -56,11 +70,13 @@
     "@anchor-lang/core": "^1.0.2",
     "@arcium-hq/client": "0.10.4",
     "@solana/spl-token": "^0.4.9",
-    "@solana/web3.js": "^1.98.4"
+    "@solana/web3.js": "^1.98.4",
+    "bn.js": "^5.2.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "tsup": "^8.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.7.3"
   }
 }

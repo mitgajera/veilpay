@@ -59,10 +59,11 @@ const vp = VeilPayClient.fromKeypair(keypair, {
 | `wallet`       | `VeilPayWallet`               | required; wallet-adapter compatible                |
 | `programId`    | `PublicKey \| string`         | optional; defaults to the IDL's baked address      |
 | `idl`          | `Idl`                         | optional; defaults to the vendored IDL             |
-| `clusterOffset`| `number`                      | required in browser; falls back to env in Node     |
+| `clusterOffset`| `number`                      | required for MPC ops in browser; falls back to env in Node; **not needed for read-only** |
 | `commitment`   | `Commitment`                  | default `"confirmed"`                              |
+| `finalizeTimeoutMs` | `number`                 | max wait for MPC finalization; `0` = wait forever (default) |
 
-Methods (all amounts accept `bigint | number | string | BN`):
+### Mutations (all amounts accept `bigint | number | string | BN`)
 
 | method                              | returns                | privacy                          |
 | ----------------------------------- | ---------------------- | -------------------------------- |
@@ -71,10 +72,40 @@ Methods (all amounts accept `bigint | number | string | BN`):
 | `deposit(mint, amount)`             | `ComputationResult`    | amount **public** (on-ramp)      |
 | `transfer(mint, receiver, amount)`  | `ComputationResult`    | amount **encrypted client-side** |
 | `withdraw(mint, amount)`            | `ComputationResult`    | amount **public** (off-ramp)     |
+| `debit(mint, amount)`               | `DebitResult`          | amount **encrypted**; no tokens move |
 | `reveal(mint)`                      | `RevealResult`         | decrypts own balance via MPC     |
-| `pdas(mint, owner?)`                | `AccountPdas`          | derive `balance`/`mintConfig`/`vault` |
 
-Also exported: `buildContext`, PDA helpers (`balancePda`, `mintConfigPda`, `vaultPda`), Arcium helpers (`compAccounts`, `randomOffset`, `finalize`, `getMXEPublicKeyWithRetry`), crypto (`newCipher`, `encryptValue`), and `VEILPAY_IDL` / `VEILPAY_PROGRAM_ID`.
+### Reads (no cluster required)
+
+| method                       | returns                      |
+| ---------------------------- | ---------------------------- |
+| `getConfidentialBalance(mint, owner?)` | `ConfidentialBalanceState` (exists, owner, mint, ciphertext, nonce) |
+| `balanceExists(mint, owner?)` | `boolean`                   |
+| `getMintConfig(mint)`        | `MintConfigState` (authority, totals) |
+| `getVaultTokenBalance(mint)` | `bigint` (vault token amount) |
+| `pdas(mint, owner?)`         | `AccountPdas`                |
+
+### Composability (build vs send)
+
+Every mutation has a `buildXIx()` that returns an unsent instruction plus the
+`computationOffset` to finalize with — for batching, simulation, or custom fees:
+
+```ts
+const { instruction, signers, computationOffset } = await vp.buildDepositIx(mint, 1000n);
+// ...add to your own Transaction, set priority fees, simulate, send...
+await vp.finalize(computationOffset!); // await MPC finalization yourself
+```
+
+### Errors
+
+Failures throw typed errors: `VeilPayValidationError` (bad input, thrown before any RPC),
+`VeilPayProgramError` (decoded on-chain error with `.code`/`.codeName`, e.g. `InsufficientFunds`),
+`VeilPayTimeoutError` (finalize/MXE-key timeout) — all extend `VeilPayError`.
+
+Also exported: `buildContext`, validation (`normalizeAmount`, `normalizePubkey`), read helpers,
+PDA helpers (`balancePda`, `mintConfigPda`, `vaultPda`), Arcium helpers (`compAccounts`,
+`randomOffset`, `finalize`, `getMXEPublicKeyWithRetry`), crypto (`newCipher`, `encryptValue`),
+and `VEILPAY_IDL` / `VEILPAY_PROGRAM_ID`.
 
 ## Admin (Node only)
 
@@ -93,5 +124,6 @@ await ensureCompDefs(ctx, "/path/to/arcium-mpc/build", (c, s) => console.log(c, 
 ```bash
 npm run sync-idl   # re-vendor IDL + types from ../arcium-mpc/target after a program build
 npm run typecheck
+npm run test       # cluster-independent unit tests (crypto, PDAs, validation, errors)
 npm run build      # dual ESM + CJS + .d.ts via tsup
 ```

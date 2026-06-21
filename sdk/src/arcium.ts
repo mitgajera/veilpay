@@ -1,4 +1,5 @@
 import * as anchor from "@anchor-lang/core";
+import BN from "bn.js";
 import { PublicKey } from "@solana/web3.js";
 import {
   awaitComputationFinalization,
@@ -12,10 +13,17 @@ import {
   getCompDefAccOffset,
 } from "@arcium-hq/client";
 import type { Ctx } from "./context";
+import { VeilPayError, VeilPayTimeoutError } from "./errors";
 
 /** Fixed account set every queued computation needs, keyed by circuit name. */
-export function compAccounts(ctx: Ctx, circuitName: string, computationOffset: anchor.BN) {
+export function compAccounts(ctx: Ctx, circuitName: string, computationOffset: BN) {
   const { program, clusterOffset } = ctx;
+  if (clusterOffset === undefined) {
+    throw new VeilPayError(
+      "No Arcium cluster configured. Pass `clusterOffset` in the config " +
+        "(required for MPC operations; read-only methods do not need it).",
+    );
+  }
   return {
     computationAccount: getComputationAccAddress(clusterOffset, computationOffset),
     clusterAccount: getClusterAccAddress(clusterOffset),
@@ -30,18 +38,45 @@ export function compAccounts(ctx: Ctx, circuitName: string, computationOffset: a
 }
 
 /** A random 8-byte computation offset as a BN (browser + Node safe). */
-export function randomOffset(): anchor.BN {
+export function randomOffset(): BN {
   const bytes = new Uint8Array(8);
   globalThis.crypto.getRandomValues(bytes);
-  return new anchor.BN(bytes);
+  return new BN(bytes);
 }
 
-/** Wait for a queued computation to finalize on-chain. */
-export async function finalize(ctx: Ctx, off: anchor.BN): Promise<void> {
+/**
+ * Wait for a queued computation to finalize on-chain. If `timeoutMs` is given
+ * (or set on the ctx) and elapses first, throws a VeilPayTimeoutError.
+ */
+export async function finalize(ctx: Ctx, off: BN, timeoutMs?: number): Promise<void> {
   // Finalization only accepts a Finality; map anything weaker to "confirmed".
   const finality: anchor.web3.Finality =
     ctx.commitment === "finalized" ? "finalized" : "confirmed";
-  await awaitComputationFinalization(ctx.provider, off, ctx.program.programId, finality);
+  const wait = awaitComputationFinalization(ctx.provider, off, ctx.program.programId, finality);
+
+  const limit = timeoutMs ?? ctx.finalizeTimeoutMs;
+  if (!limit || limit <= 0) {
+    await wait;
+    return;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new VeilPayTimeoutError(
+            `Computation ${off.toString()} did not finalize within ${limit}ms`,
+          ),
+        ),
+      limit,
+    );
+  });
+  try {
+    await Promise.race([wait, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -61,7 +96,9 @@ export async function getMXEPublicKeyWithRetry(
     }
     if (attempt < maxRetries) await new Promise((r) => setTimeout(r, retryDelayMs));
   }
-  throw new Error(`Failed to fetch MXE public key after ${maxRetries} attempts`);
+  throw new VeilPayTimeoutError(
+    `Failed to fetch MXE public key after ${maxRetries} attempts`,
+  );
 }
 
 /** PDA of an owner's confidential balance for a mint. */

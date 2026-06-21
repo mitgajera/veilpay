@@ -1,4 +1,4 @@
-import * as anchor from "@anchor-lang/core";
+import BN from "bn.js";
 import { RescueCipher, x25519, deserializeLE } from "@arcium-hq/client";
 
 /** 16-byte random nonce, usable in both Node and the browser. */
@@ -22,7 +22,7 @@ export interface EncryptedValue {
   ciphertext: number[];
   publicKey: number[];
   nonce: Uint8Array;
-  nonceBN: anchor.BN;
+  nonceBN: BN;
 }
 
 /**
@@ -38,6 +38,6 @@ export function encryptValue(mxePublicKey: Uint8Array, value: bigint): Encrypted
     ciphertext: Array.from(ct[0]) as number[],
     publicKey: Array.from(publicKey) as number[],
     nonce,
-    nonceBN: new anchor.BN(deserializeLE(nonce).toString()),
+    nonceBN: new BN(deserializeLE(nonce).toString()),
   };
 }

@@ -25,6 +25,11 @@ export interface VeilPayConfig {
   clusterOffset?: number;
   /** Commitment for the provider and confirmations. Default "confirmed". */
   commitment?: anchor.web3.Commitment;
+  /**
+   * Max time to wait for an MPC computation to finalize, in ms. 0/undefined
+   * waits indefinitely (the Arcium client's own behavior). Default 0.
+   */
+  finalizeTimeoutMs?: number;
 }
 
 /** Resolved runtime context shared by every SDK operation. */
@@ -33,19 +38,19 @@ export interface Ctx {
   wallet: VeilPayWallet;
   provider: anchor.AnchorProvider;
   program: Program<Veilpay>;
-  clusterOffset: number;
+  /** Undefined when no cluster is configured; only MPC operations need it. */
+  clusterOffset: number | undefined;
   commitment: anchor.web3.Commitment;
+  finalizeTimeoutMs: number;
 }
 
-function resolveClusterOffset(cfg: VeilPayConfig): number {
+/** Resolve the cluster offset, or undefined if none is configured (read-only is fine). */
+function resolveClusterOffset(cfg: VeilPayConfig): number | undefined {
   if (cfg.clusterOffset !== undefined) return cfg.clusterOffset;
   try {
     return getArciumEnv().arciumClusterOffset;
   } catch {
-    throw new Error(
-      "clusterOffset is required: getArciumEnv() is unavailable here. " +
-        "Pass `clusterOffset` in the VeilPayClient config.",
-    );
+    return undefined;
   }
 }
 
@@ -56,23 +61,15 @@ export function buildContext(cfg: VeilPayConfig): Ctx {
     commitment,
   });
 
-  const idl = cfg.idl ?? VEILPAY_IDL;
-  const program = new Program(idl, provider) as Program<Veilpay>;
+  let idl = cfg.idl ?? VEILPAY_IDL;
   if (cfg.programId) {
     // Anchor keys the program by its IDL `address`; honor an explicit override.
     const pid = new PublicKey(cfg.programId);
-    if (!pid.equals(program.programId)) {
-      const patched = { ...idl, address: pid.toBase58() } as anchor.Idl;
-      return {
-        connection: cfg.connection,
-        wallet: cfg.wallet,
-        provider,
-        program: new Program(patched, provider) as Program<Veilpay>,
-        clusterOffset: resolveClusterOffset(cfg),
-        commitment,
-      };
+    if (pid.toBase58() !== (idl as { address?: string }).address) {
+      idl = { ...idl, address: pid.toBase58() } as anchor.Idl;
     }
   }
+  const program = new Program(idl, provider) as Program<Veilpay>;
 
   return {
     connection: cfg.connection,
@@ -81,5 +78,6 @@ export function buildContext(cfg: VeilPayConfig): Ctx {
     program,
     clusterOffset: resolveClusterOffset(cfg),
     commitment,
+    finalizeTimeoutMs: cfg.finalizeTimeoutMs ?? 0,
   };
 }

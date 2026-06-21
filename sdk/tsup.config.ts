@@ -17,5 +17,6 @@ export default defineConfig({
     "@arcium-hq/client",
     "@solana/spl-token",
     "@solana/web3.js",
+    "bn.js",
   ],
 });

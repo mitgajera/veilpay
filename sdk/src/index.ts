@@ -14,6 +14,26 @@ export {
 } from "./context";
 
 export {
+  VeilPayError,
+  VeilPayValidationError,
+  VeilPayTimeoutError,
+  VeilPayProgramError,
+  VEILPAY_ERROR_CODES,
+  wrapSendError,
+} from "./errors";
+
+export { normalizeAmount, normalizePubkey } from "./validate";
+
+export {
+  getConfidentialBalance,
+  balanceExists,
+  getMintConfig,
+  getVaultTokenBalance,
+  type ConfidentialBalanceState,
+  type MintConfigState,
+} from "./accounts";
+
+export {
   balancePda,
   mintConfigPda,
   vaultPda,
@@ -39,5 +59,8 @@ export type {
   InitMintResult,
   InitBalanceResult,
   RevealResult,
+  DebitResult,
   AccountPdas,
+  BuiltInstruction,
+  SendOptions,
 } from "./types";

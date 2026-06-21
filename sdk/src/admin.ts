@@ -23,6 +23,7 @@ export const COMP_DEFS: ReadonlyArray<readonly [circuit: string, initMethod: str
   ["deposit_to_account", "initDepositToAccountCompDef"],
   ["withdraw_from_account", "initWithdrawFromAccountCompDef"],
   ["transfer_between_accounts", "initTransferBetweenAccountsCompDef"],
+  ["debit_from_account", "initDebitFromAccountCompDef"],
   ["reveal_account_balance", "initRevealAccountBalanceCompDef"],
 ];
 
