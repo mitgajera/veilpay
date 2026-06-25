@@ -1,0 +1,307 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * VeilPay design system — built around the Dither background.
+ * Dark-only. Glass surfaces float over the shader; glows replace drop shadows.
+ * Palette extracted from the dither: void/deep/surface purples + a #5b4fff accent.
+ * shadcn token names are mapped onto the palette so existing components inherit;
+ * extended named tokens (void/deep/surface/elevated/private/success…) are also
+ * exposed as Tailwind utilities.
+ */
+:root,
+.dark {
+  /*
+   * Monochrome. Black canvas, grey dithered waves, white text + white primary
+   * buttons — exactly like the ReactBits reference. No hue anywhere except a
+   * single muted red reserved for genuine errors (kept for accessibility).
+   */
+  --background: #000000;
+  --foreground: #ededed;
+  --card: rgba(255, 255, 255, 0.045); /* glass-card */
+  --card-foreground: #ededed;
+  --popover: #0b0b0b; /* opaque for menus */
+  --popover-foreground: #ededed;
+  --primary: #ffffff; /* white buttons */
+  --primary-foreground: #000000;
+  --secondary: rgba(255, 255, 255, 0.08);
+  --secondary-foreground: #ededed;
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: #8a8a8a;
+  --accent: #ededed; /* monochrome "confirmed" */
+  --accent-foreground: #000000;
+  --destructive: #d65a5a;
+  --destructive-foreground: #000000;
+  --border: rgba(255, 255, 255, 0.12);
+  --input: rgba(255, 255, 255, 0.14);
+  --ring: rgba(255, 255, 255, 0.7);
+  --radius: 0.75rem;
+
+  /* extended palette — grayscale */
+  --void: #000000;
+  --deep: #060606;
+  --surface: #0d0d0d;
+  --elevated: #161616;
+  --border-hi: rgba(255, 255, 255, 0.24);
+  --accent-hi: #ffffff;
+  --accent-lo: #d4d4d4;
+  --accent-bg: rgba(255, 255, 255, 0.08);
+  --text-secondary: #9a9a9a;
+  --text-muted: #5e5e5e;
+  --private: #cfcfcf;
+  --public: #cfcfcf;
+  --masked: #5e5e5e;
+  --success: #cfcfcf;
+  --success-bg: rgba(255, 255, 255, 0.06);
+  --warning: #cfcfcf;
+  --warning-bg: rgba(255, 255, 255, 0.06);
+  --error: #d65a5a;
+  --error-bg: rgba(214, 90, 90, 0.1);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* extended named colors → utilities (bg-void, text-private, border-hi…) */
+  --color-void: var(--void);
+  --color-deep: var(--deep);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-border-hi: var(--border-hi);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent-hi: var(--accent-hi);
+  --color-accent-lo: var(--accent-lo);
+  --color-private: var(--private);
+  --color-public: var(--public);
+  --color-masked: var(--masked);
+  --color-accent-bg: var(--accent-bg);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-error: var(--error);
+  --color-error-bg: var(--error-bg);
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 4px);
+  --radius-sm: calc(var(--radius) - 8px);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+
+  /* subtle white glows instead of colored shadows */
+  --shadow-glow-accent: 0 0 20px rgba(255, 255, 255, 0.1);
+  --shadow-glow-accent-hi: 0 0 28px rgba(255, 255, 255, 0.16);
+  --shadow-glow-success: 0 0 20px rgba(255, 255, 255, 0.08);
+  --shadow-glow-border: 0 0 0 1px rgba(255, 255, 255, 0.35);
+
+  --animate-shimmer: shimmer 1.5s infinite linear;
+  --animate-reveal-in: reveal-in 0.4s ease-out forwards;
+  --animate-glow-pulse: glow-pulse 0.6s ease-in-out;
+}
+
+* {
+  border-color: var(--border);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Display face for headings / logo / hero numbers. */
+.font-display {
+  font-family: var(--font-display);
+}
+
+/*
+ * Dotted display accent (LED dot-matrix). Ties type into the dither/halftone
+ * motif. Display moments ONLY — hero headline, big eyebrows. Never body, UI,
+ * docs, or spendable amounts (digit ambiguity). Pair with wider tracking; the
+ * face has no bold, so don't apply font-bold (faux-bold muddies the dots).
+ */
+.font-dot {
+  font-family: var(--font-dot);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hi);
+}
+
+::selection {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+}
+
+/* Global keyboard focus ring (brand color) for anything without its own. */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+/* ---- Surfaces & utilities ---- */
+
+.glass-panel {
+  background: rgba(10, 10, 10, 0.7);
+  backdrop-filter: blur(20px) saturate(1.1);
+  -webkit-backdrop-filter: blur(20px) saturate(1.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-card,
+.glass {
+  background: rgba(255, 255, 255, 0.045);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.label-caps {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  /* text-secondary, not text-muted: #5e5e5e on black is ~3.2:1 and fails AA for 10px text */
+  color: var(--text-secondary);
+}
+
+/*
+ * Confidential numbers: mono + tabular figures so a masked "••••••" and the
+ * revealed amount occupy identical width — the balance never shifts when it
+ * decrypts. Use for every amount, balance, and address.
+ */
+.font-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.privacy-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--private);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--elevated) 25%, var(--border) 50%, var(--elevated) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.5s infinite linear;
+  border-radius: var(--radius-sm);
+}
+
+/* Monochrome "sheen" + text (white → grey). */
+.veil-sheen {
+  background-color: #ffffff;
+}
+.veil-text {
+  background-image: linear-gradient(135deg, #ffffff 0%, #8a8a8a 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Soft grey glow used as the static dither fallback. */
+.veil-aurora {
+  background:
+    radial-gradient(45% 55% at 25% 20%, rgba(255, 255, 255, 0.1), transparent 70%),
+    radial-gradient(45% 55% at 80% 30%, rgba(255, 255, 255, 0.06), transparent 70%);
+  filter: blur(40px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .veil-aurora {
+    animation: veil-drift 16s ease-in-out infinite alternate;
+  }
+}
+
+/* ---- Keyframes ---- */
+@keyframes veil-drift {
+  from {
+    transform: translate3d(-3%, -2%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(4%, 3%, 0) scale(1.08);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -400px 0;
+  }
+  100% {
+    background-position: 400px 0;
+  }
+}
+
+@keyframes reveal-in {
+  0% {
+    filter: blur(8px);
+    opacity: 0;
+  }
+  100% {
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 36px rgba(255, 255, 255, 0.3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-reveal-in,
+  .animate-glow-pulse,
+  .skeleton {
+    animation: none !important;
+  }
+}
