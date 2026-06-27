@@ -6,14 +6,11 @@ package_manager = "yarn"
 resolution = true
 skip-lint = false
 
-[programs.localnet]
-veilpay = "AVqXCN6eZshXdAaRHhBV4AMxpsVZKj9jRCdSQptax7GD"
-
 [programs.devnet]
-veilpay = "AVqXCN6eZshXdAaRHhBV4AMxpsVZKj9jRCdSQptax7GD"
+veilpay = "6QPCy4uju8fKdzje3vkifX6YH6sRZ9ZuzyhdMjb25cGa"
 
-[registry]
-url = "https://api.apr.dev"
+[programs.localnet]
+veilpay = "6QPCy4uju8fKdzje3vkifX6YH6sRZ9ZuzyhdMjb25cGa"
 
 [provider]
 cluster = "localnet"
@@ -22,6 +19,9 @@ wallet = "~/.config/solana/id.json"
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
 
+[hooks]
+
 [test]
 startup_wait = 60000
 shutdown_wait = 2000
+upgradeable = false

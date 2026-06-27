@@ -30,7 +30,7 @@ export default function ProgramPage() {
                 <strong>Program ID</strong>
               </td>
               <td>
-                <code>AVqXCN6eZshXdAaRHhBV4AMxpsVZKj9jRCdSQptax7GD</code>
+                <code>6QPCy4uju8fKdzje3vkifX6YH6sRZ9ZuzyhdMjb25cGa</code>
               </td>
             </tr>
             <tr>

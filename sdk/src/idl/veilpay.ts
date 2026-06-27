@@ -5,7 +5,7 @@
  * IDL can be found at `target/idl/veilpay.json`.
  */
 export type Veilpay = {
-  "address": "AVqXCN6eZshXdAaRHhBV4AMxpsVZKj9jRCdSQptax7GD",
+  "address": "6QPCy4uju8fKdzje3vkifX6YH6sRZ9ZuzyhdMjb25cGa",
   "metadata": {
     "name": "veilpay",
     "version": "0.1.0",
