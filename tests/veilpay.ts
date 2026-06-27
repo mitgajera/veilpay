@@ -23,6 +23,11 @@ import {
   getLookupTableAddress,
   x25519,
 } from "@arcium-hq/client";
+import {
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 import * as fs from "fs";
 import * as os from "os";
 import { expect } from "chai";
@@ -128,6 +133,83 @@ describe("Veilpay", () => {
         Buffer.from(getCompDefAccOffset(circuitName)).readUInt32LE(),
       ),
     };
+  }
+
+  // Devnet RPC nodes occasionally lag and reject a fresh blockhash ("Blockhash not
+  // found") or rate-limit (429) on preflight. These are transient — retry with backoff.
+  async function withRetry<T>(fn: () => Promise<T>, tries = 5): Promise<T> {
+    let lastErr: unknown;
+    for (let i = 0; i < tries; i++) {
+      try {
+        return await fn();
+      } catch (e) {
+        lastErr = e;
+        const msg = String((e as { message?: string })?.message ?? e);
+        if (!/Blockhash not found|block height exceeded|Simulation failed|429|Too Many|Node is behind/i.test(msg)) {
+          throw e;
+        }
+        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  // Real SPL mint + vault for the persistent-balance (account) flows. Creates the
+  // program-owned mint, an ATA for the payer, and mints `baseUnits` to fund deposits.
+  type MintCtx = { mint: PublicKey; ata: PublicKey; mintConfig: PublicKey; vault: PublicKey };
+  async function setupFundedMint(baseUnits: number): Promise<MintCtx> {
+    const mintKp = anchor.web3.Keypair.generate();
+    const mint = mintKp.publicKey;
+    const [mintConfig] = PublicKey.findProgramAddressSync(
+      [Buffer.from("mint_config"), mint.toBuffer()], program.programId);
+    const [vault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), mintConfig.toBuffer()], program.programId);
+
+    await withRetry(() =>
+      program.methods
+        .initializeMint()
+        .accountsPartial({
+          mintConfig,
+          mint,
+          authority: owner.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([mintKp])
+        .rpc({ skipPreflight: true, commitment: "confirmed" }),
+    );
+
+    const ata = await withRetry(() =>
+      getOrCreateAssociatedTokenAccount(provider.connection, owner, mint, owner.publicKey),
+    );
+    await withRetry(() =>
+      mintTo(provider.connection, owner, mint, ata.address, owner, BigInt(baseUnits), [], {
+        skipPreflight: true,
+        commitment: "confirmed",
+      }),
+    );
+    return { mint, ata: ata.address, mintConfig, vault };
+  }
+
+  // Public-amount on-ramp: moves `amount` real tokens into the vault and credits
+  // the confidential balance (deposit_to_account circuit).
+  async function depositToAccount(ctx: MintCtx, balancePda: PublicKey, amount: number) {
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .depositToAccount(off, new anchor.BN(amount))
+      .accountsPartial({
+        payer: owner.publicKey,
+        mint: ctx.mint,
+        confidentialBalance: balancePda,
+        ownerTokenAccount: ctx.ata,
+        vault: ctx.vault,
+        mintConfig: ctx.mintConfig,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        ...compAccounts("deposit_to_account", off),
+      })
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
   }
 
   let mxePublicKey: Uint8Array;
@@ -372,11 +454,10 @@ describe("Veilpay", () => {
     await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
     await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
 
-    const payer = (provider as anchor.AnchorProvider).wallet.publicKey;
-    // Dummy mint for now (no SPL yet) — just keys the PDA.
-    const mint = anchor.web3.Keypair.generate().publicKey;
+    const payer = owner.publicKey;
+    const ctx = await setupFundedMint(150);
     const [balancePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("balance"), payer.toBuffer(), mint.toBuffer()],
+      [Buffer.from("balance"), payer.toBuffer(), ctx.mint.toBuffer()],
       program.programId,
     );
 
@@ -386,7 +467,7 @@ describe("Veilpay", () => {
       await program.methods
         .initBalance(off)
         .accountsPartial({
-          mint,
+          mint: ctx.mint,
           confidentialBalance: balancePda,
           ...compAccounts("init_balance", off),
         })
@@ -394,23 +475,9 @@ describe("Veilpay", () => {
       await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
     }
 
-    // 2. deposit 100, then 50 — each reads the stored ciphertext + writes back
-    for (const amount of [BigInt(100), BigInt(50)]) {
-      const { cipher, publicKey } = newCipher(mxePublicKey);
-      const nonce = randomBytes(16);
-      const ct = cipher.encrypt([amount], nonce);
-      const off = new anchor.BN(randomBytes(8), "hex");
-      await program.methods
-        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
-          new anchor.BN(deserializeLE(nonce).toString()))
-        .accountsPartial({
-          mint,
-          confidentialBalance: balancePda,
-          ...compAccounts("deposit_to_account", off),
-        })
-        .rpc({ skipPreflight: true, commitment: "confirmed" });
-      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
-    }
+    // 2. deposit 100, then 50 — each moves real tokens + re-encrypts the balance
+    await depositToAccount(ctx, balancePda, 100);
+    await depositToAccount(ctx, balancePda, 50);
 
     // 3. reveal the persisted balance -> 150
     const ev = awaitEvent("accountBalanceRevealedEvent");
@@ -418,7 +485,7 @@ describe("Veilpay", () => {
     await program.methods
       .revealAccountBalance(off)
       .accountsPartial({
-        mint,
+        mint: ctx.mint,
         confidentialBalance: balancePda,
         ...compAccounts("reveal_account_balance", off),
       })
@@ -431,16 +498,16 @@ describe("Veilpay", () => {
     expect(e.balance.toString()).to.equal("150");
   });
 
-  it("spends from a persistent balance: +100 -> overdraft 999 (no-op) -> debit 30 -> reveal 70", async () => {
+  it("withdraws from a persistent balance: +100 -> withdraw 40 -> reveal 60 (40 tokens returned)", async () => {
     await initCompDef("init_balance", "initInitBalanceCompDef");
     await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
-    await initCompDef("debit_from_account", "initDebitFromAccountCompDef");
+    await initCompDef("withdraw_from_account", "initWithdrawFromAccountCompDef");
     await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
 
-    const payer = (provider as anchor.AnchorProvider).wallet.publicKey;
-    const mint = anchor.web3.Keypair.generate().publicKey;
+    const payer = owner.publicKey;
+    const ctx = await setupFundedMint(100);
     const [balancePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("balance"), payer.toBuffer(), mint.toBuffer()],
+      [Buffer.from("balance"), payer.toBuffer(), ctx.mint.toBuffer()],
       program.programId,
     );
 
@@ -449,24 +516,75 @@ describe("Veilpay", () => {
       const off = new anchor.BN(randomBytes(8), "hex");
       await program.methods
         .initBalance(off)
-        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("init_balance", off) })
+        .accountsPartial({ mint: ctx.mint, confidentialBalance: balancePda, ...compAccounts("init_balance", off) })
         .rpc({ skipPreflight: true, commitment: "confirmed" });
       await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
     }
 
-    // deposit 100
+    // deposit 100 — vault now holds 100, the owner's ATA is drained to 0
+    await depositToAccount(ctx, balancePda, 100);
+
+    // withdraw 40 — proves the hidden balance covers it, returns 40 real tokens
     {
-      const { cipher, publicKey } = newCipher(mxePublicKey);
-      const nonce = randomBytes(16);
-      const ct = cipher.encrypt([BigInt(100)], nonce);
       const off = new anchor.BN(randomBytes(8), "hex");
       await program.methods
-        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
-          new anchor.BN(deserializeLE(nonce).toString()))
-        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("deposit_to_account", off) })
+        .withdrawFromAccount(off, new anchor.BN(40))
+        .accountsPartial({
+          payer: owner.publicKey,
+          mint: ctx.mint,
+          confidentialBalance: balancePda,
+          ownerTokenAccount: ctx.ata,
+          vault: ctx.vault,
+          mintConfig: ctx.mintConfig,
+          ...compAccounts("withdraw_from_account", off),
+        })
         .rpc({ skipPreflight: true, commitment: "confirmed" });
       await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
     }
+
+    // reveal -> 60
+    const ev = awaitEvent("accountBalanceRevealedEvent");
+    const off = new anchor.BN(randomBytes(8), "hex");
+    await program.methods
+      .revealAccountBalance(off)
+      .accountsPartial({ mint: ctx.mint, confidentialBalance: balancePda, ...compAccounts("reveal_account_balance", off) })
+      .rpc({ skipPreflight: true, commitment: "confirmed" });
+    await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+
+    const e = await ev;
+    console.log("Balance after +100, withdraw 40:", e.balance.toString());
+    expect(e.balance.toString()).to.equal("60");
+
+    // the 40 withdrawn tokens are back in the owner's ATA (real off-ramp)
+    const ata = await provider.connection.getTokenAccountBalance(ctx.ata);
+    expect(ata.value.amount).to.equal("40");
+  });
+
+  it("spends from a persistent balance: +100 -> overdraft 999 (no-op) -> debit 30 -> reveal 70", async () => {
+    await initCompDef("init_balance", "initInitBalanceCompDef");
+    await initCompDef("deposit_to_account", "initDepositToAccountCompDef");
+    await initCompDef("debit_from_account", "initDebitFromAccountCompDef");
+    await initCompDef("reveal_account_balance", "initRevealAccountBalanceCompDef");
+
+    const payer = owner.publicKey;
+    const ctx = await setupFundedMint(100);
+    const [balancePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("balance"), payer.toBuffer(), ctx.mint.toBuffer()],
+      program.programId,
+    );
+
+    // init -> 0
+    {
+      const off = new anchor.BN(randomBytes(8), "hex");
+      await program.methods
+        .initBalance(off)
+        .accountsPartial({ mint: ctx.mint, confidentialBalance: balancePda, ...compAccounts("init_balance", off) })
+        .rpc({ skipPreflight: true, commitment: "confirmed" });
+      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
+    }
+
+    // deposit 100 (real SPL on-ramp)
+    await depositToAccount(ctx, balancePda, 100);
 
     // debit helper — balance is read from the account, client only provides the amount
     const debit = async (amount: bigint) => {
@@ -477,7 +595,7 @@ describe("Veilpay", () => {
       await program.methods
         .debitFromAccount(off, Array.from(ct[0]), Array.from(publicKey),
           new anchor.BN(deserializeLE(nonce).toString()))
-        .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("debit_from_account", off) })
+        .accountsPartial({ mint: ctx.mint, confidentialBalance: balancePda, ...compAccounts("debit_from_account", off) })
         .rpc({ skipPreflight: true, commitment: "confirmed" });
       await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
     };
@@ -490,7 +608,7 @@ describe("Veilpay", () => {
     const off = new anchor.BN(randomBytes(8), "hex");
     await program.methods
       .revealAccountBalance(off)
-      .accountsPartial({ mint, confidentialBalance: balancePda, ...compAccounts("reveal_account_balance", off) })
+      .accountsPartial({ mint: ctx.mint, confidentialBalance: balancePda, ...compAccounts("reveal_account_balance", off) })
       .rpc({ skipPreflight: true, commitment: "confirmed" });
     await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
 
@@ -508,11 +626,23 @@ describe("Veilpay", () => {
     const sender = (provider as anchor.AnchorProvider).wallet.publicKey;
     const receiverKp = anchor.web3.Keypair.generate();
     const receiver = receiverKp.publicKey;
-    const mint = anchor.web3.Keypair.generate().publicKey;
+    const ctx = await setupFundedMint(100);
+    const mint = ctx.mint;
 
-    // fund the receiver so it can pay rent for its own balance account
-    const air = await provider.connection.requestAirdrop(receiver, 1_000_000_000);
-    await provider.connection.confirmTransaction(air, "confirmed");
+    // fund the receiver so it can pay rent for its own balance account.
+    // (devnet airdrops are rate-limited, so transfer from the payer instead)
+    await withRetry(() => {
+      const fundTx = new anchor.web3.Transaction().add(
+        anchor.web3.SystemProgram.transfer({
+          fromPubkey: owner.publicKey,
+          toPubkey: receiver,
+          lamports: 100_000_000,
+        }),
+      );
+      return (provider as anchor.AnchorProvider).sendAndConfirm(fundTx, [owner], {
+        skipPreflight: true,
+      });
+    });
 
     const [senderBal] = PublicKey.findProgramAddressSync(
       [Buffer.from("balance"), sender.toBuffer(), mint.toBuffer()], program.programId);
@@ -532,19 +662,8 @@ describe("Veilpay", () => {
     await initBal(senderBal);
     await initBal(receiverBal, receiverKp);
 
-    // deposit 100 to sender
-    {
-      const { cipher, publicKey } = newCipher(mxePublicKey);
-      const nonce = randomBytes(16);
-      const ct = cipher.encrypt([BigInt(100)], nonce);
-      const off = new anchor.BN(randomBytes(8), "hex");
-      await program.methods
-        .depositToAccount(off, Array.from(ct[0]), Array.from(publicKey),
-          new anchor.BN(deserializeLE(nonce).toString()))
-        .accountsPartial({ mint, confidentialBalance: senderBal, ...compAccounts("deposit_to_account", off) })
-        .rpc({ skipPreflight: true, commitment: "confirmed" });
-      await awaitComputationFinalization(provider as anchor.AnchorProvider, off, program.programId, "confirmed");
-    }
+    // deposit 100 to sender (real SPL on-ramp)
+    await depositToAccount(ctx, senderBal, 100);
 
     // transfer 40 sender -> receiver (sender signs; both balances read on-chain)
     {
