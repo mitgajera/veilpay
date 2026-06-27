@@ -9,7 +9,9 @@ use crate::constants::{
     COMP_DEF_OFFSET_TRANSFER_BETWEEN_ACCOUNTS, COMP_DEF_OFFSET_WITHDRAW_FROM_ACCOUNT,
 };
 use crate::errors::ErrorCode;
+use crate::events::{AccountBalanceRevealedEvent, DepositMade, WithdrawalMade};
 use crate::state::{ConfidentialBalance, MintConfig};
+use arcium_client::idl::arcium::types::CallbackAccount;
 
 #[queue_computation_accounts("init_balance", payer)]
 #[derive(Accounts)]
@@ -591,4 +593,427 @@ pub struct InitRevealAccountBalanceCompDef<'info> {
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
+}
+
+// ----------------------------------------------------------------- handlers
+
+/// Create a confidential balance account for (owner, mint) and queue the MPC
+/// computation that fills it with an encrypted zero.
+pub fn init_balance_handler(ctx: Context<InitBalance>, computation_offset: u64) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+    let bal = &mut ctx.accounts.confidential_balance;
+    bal.bump = ctx.bumps.confidential_balance;
+    bal.owner = ctx.accounts.payer.key();
+    bal.mint = ctx.accounts.mint.key();
+
+    let args = ArgBuilder::new().build();
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![InitBalanceCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[CallbackAccount {
+                pubkey: ctx.accounts.confidential_balance.key(),
+                is_writable: true,
+            }],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn init_balance_callback(
+    ctx: Context<InitBalanceCallback>,
+    output: SignedComputationOutputs<InitBalanceOutput>,
+) -> Result<()> {
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(InitBalanceOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    let bal = &mut ctx.accounts.confidential_balance;
+    bal.encrypted_balance = o.ciphertexts;
+    bal.nonce = o.nonce;
+    Ok(())
+}
+
+/// Deposit real tokens into the vault and credit the confidential balance.
+pub fn deposit_to_account_handler(
+    ctx: Context<DepositToAccount>,
+    computation_offset: u64,
+    amount: u64,
+) -> Result<()> {
+    require!(amount > 0, ErrorCode::InvalidAmount);
+    require!(
+        ctx.accounts.owner_token_account.amount >= amount,
+        ErrorCode::InsufficientFunds
+    );
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+    // Move the real tokens into the vault (public on-ramp).
+    anchor_spl::token::transfer(
+        CpiContext::new(
+            ctx.accounts.token_program.key(),
+            anchor_spl::token::Transfer {
+                from: ctx.accounts.owner_token_account.to_account_info(),
+                to: ctx.accounts.vault.to_account_info(),
+                authority: ctx.accounts.payer.to_account_info(),
+            },
+        ),
+        amount,
+    )?;
+
+    let mint_config = &mut ctx.accounts.mint_config;
+    mint_config.total_deposited = mint_config
+        .total_deposited
+        .checked_add(amount)
+        .ok_or(ErrorCode::Overflow)?;
+
+    emit!(DepositMade {
+        owner: ctx.accounts.payer.key(),
+        mint: ctx.accounts.mint.key(),
+        amount,
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    let args = ArgBuilder::new()
+        .plaintext_u64(amount)
+        .plaintext_u128(ctx.accounts.confidential_balance.nonce)
+        .account(ctx.accounts.confidential_balance.key(), 8 + 1, 32)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![DepositToAccountCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[CallbackAccount {
+                pubkey: ctx.accounts.confidential_balance.key(),
+                is_writable: true,
+            }],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn deposit_to_account_callback(
+    ctx: Context<DepositToAccountCallback>,
+    output: SignedComputationOutputs<DepositToAccountOutput>,
+) -> Result<()> {
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(DepositToAccountOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    let bal = &mut ctx.accounts.confidential_balance;
+    bal.encrypted_balance = o.ciphertexts;
+    bal.nonce = o.nonce;
+    Ok(())
+}
+
+/// Spend `amount` from the stored confidential balance with no-overdraft.
+pub fn debit_from_account_handler(
+    ctx: Context<DebitFromAccount>,
+    computation_offset: u64,
+    ciphertext_amount: [u8; 32],
+    pubkey: [u8; 32],
+    amount_nonce: u128,
+) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+    let args = ArgBuilder::new()
+        .x25519_pubkey(pubkey)
+        .plaintext_u128(amount_nonce)
+        .encrypted_u64(ciphertext_amount)
+        .plaintext_u128(ctx.accounts.confidential_balance.nonce)
+        .account(ctx.accounts.confidential_balance.key(), 8 + 1, 32)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![DebitFromAccountCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[CallbackAccount {
+                pubkey: ctx.accounts.confidential_balance.key(),
+                is_writable: true,
+            }],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn debit_from_account_callback(
+    ctx: Context<DebitFromAccountCallback>,
+    output: SignedComputationOutputs<DebitFromAccountOutput>,
+) -> Result<()> {
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(DebitFromAccountOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    let bal = &mut ctx.accounts.confidential_balance;
+    bal.encrypted_balance = o.ciphertexts;
+    bal.nonce = o.nonce;
+    Ok(())
+}
+
+/// Withdraw a PUBLIC `amount` of real tokens from the vault, debiting the
+/// confidential balance (MPC proves coverage and reveals only the released amount).
+pub fn withdraw_from_account_handler(
+    ctx: Context<WithdrawFromAccount>,
+    computation_offset: u64,
+    amount: u64,
+) -> Result<()> {
+    require!(amount > 0, ErrorCode::InvalidAmount);
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+    let args = ArgBuilder::new()
+        .plaintext_u64(amount)
+        .plaintext_u128(ctx.accounts.confidential_balance.nonce)
+        .account(ctx.accounts.confidential_balance.key(), 8 + 1, 32)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![WithdrawFromAccountCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[
+                CallbackAccount {
+                    pubkey: ctx.accounts.confidential_balance.key(),
+                    is_writable: true,
+                },
+                CallbackAccount {
+                    pubkey: ctx.accounts.mint_config.key(),
+                    is_writable: true,
+                },
+                CallbackAccount {
+                    pubkey: ctx.accounts.vault.key(),
+                    is_writable: true,
+                },
+                CallbackAccount {
+                    pubkey: ctx.accounts.owner_token_account.key(),
+                    is_writable: true,
+                },
+                CallbackAccount {
+                    pubkey: anchor_spl::token::ID,
+                    is_writable: false,
+                },
+            ],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn withdraw_from_account_callback(
+    ctx: Context<WithdrawFromAccountCallback>,
+    output: SignedComputationOutputs<WithdrawFromAccountOutput>,
+) -> Result<()> {
+    // Tuple return: field_0 = new encrypted balance, field_1 = revealed released amount.
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(WithdrawFromAccountOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    let new_balance = o.field_0;
+    let released = o.field_1;
+
+    let bal = &mut ctx.accounts.confidential_balance;
+    bal.encrypted_balance = new_balance.ciphertexts;
+    bal.nonce = new_balance.nonce;
+
+    if released > 0 {
+        let mint_key = ctx.accounts.mint_config.mint;
+        let bump = ctx.accounts.mint_config.bump;
+        let bump_arr = [bump];
+        let seeds: &[&[u8]] = &[b"mint_config", mint_key.as_ref(), &bump_arr];
+        let signer_seeds = &[seeds];
+
+        anchor_spl::token::transfer(
+            CpiContext::new_with_signer(
+                anchor_spl::token::ID,
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.owner_token_account.to_account_info(),
+                    authority: ctx.accounts.mint_config.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            released,
+        )?;
+
+        let mc = &mut ctx.accounts.mint_config;
+        mc.total_withdrawn = mc
+            .total_withdrawn
+            .checked_add(released)
+            .ok_or(ErrorCode::Overflow)?;
+
+        emit!(WithdrawalMade {
+            owner: ctx.accounts.owner_token_account.owner,
+            mint: mint_key,
+            amount: released,
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+    }
+    Ok(())
+}
+
+/// Confidential transfer from the signer's balance to the receiver's balance.
+pub fn transfer_between_accounts_handler(
+    ctx: Context<TransferBetweenAccounts>,
+    computation_offset: u64,
+    ciphertext_amount: [u8; 32],
+    pubkey: [u8; 32],
+    amount_nonce: u128,
+) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+    let args = ArgBuilder::new()
+        .x25519_pubkey(pubkey)
+        .plaintext_u128(amount_nonce)
+        .encrypted_u64(ciphertext_amount)
+        .plaintext_u128(ctx.accounts.sender_balance.nonce)
+        .account(ctx.accounts.sender_balance.key(), 8 + 1, 32)
+        .plaintext_u128(ctx.accounts.receiver_balance.nonce)
+        .account(ctx.accounts.receiver_balance.key(), 8 + 1, 32)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![TransferBetweenAccountsCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[
+                CallbackAccount {
+                    pubkey: ctx.accounts.sender_balance.key(),
+                    is_writable: true,
+                },
+                CallbackAccount {
+                    pubkey: ctx.accounts.receiver_balance.key(),
+                    is_writable: true,
+                },
+            ],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn transfer_between_accounts_callback(
+    ctx: Context<TransferBetweenAccountsCallback>,
+    output: SignedComputationOutputs<TransferBetweenAccountsOutput>,
+) -> Result<()> {
+    let pair = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(TransferBetweenAccountsOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    let sender = &mut ctx.accounts.sender_balance;
+    sender.encrypted_balance = pair.field_0.ciphertexts;
+    sender.nonce = pair.field_0.nonce;
+    let receiver = &mut ctx.accounts.receiver_balance;
+    receiver.encrypted_balance = pair.field_1.ciphertexts;
+    receiver.nonce = pair.field_1.nonce;
+    Ok(())
+}
+
+/// Reveal the stored confidential balance (decrypts via MPC and emits it).
+pub fn reveal_account_balance_handler(
+    ctx: Context<RevealAccountBalance>,
+    computation_offset: u64,
+) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+    let args = ArgBuilder::new()
+        .plaintext_u128(ctx.accounts.confidential_balance.nonce)
+        .account(ctx.accounts.confidential_balance.key(), 8 + 1, 32)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![RevealAccountBalanceCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn reveal_account_balance_callback(
+    ctx: Context<RevealAccountBalanceCallback>,
+    output: SignedComputationOutputs<RevealAccountBalanceOutput>,
+) -> Result<()> {
+    let balance = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(RevealAccountBalanceOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    emit!(AccountBalanceRevealedEvent { balance });
+    Ok(())
 }

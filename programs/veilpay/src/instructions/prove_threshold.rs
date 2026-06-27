@@ -3,6 +3,8 @@ use arcium_anchor::prelude::*;
 
 use crate::{ArciumSignerAccount, ID, ID_CONST};
 use crate::constants::COMP_DEF_OFFSET_PROVE_THRESHOLD;
+use crate::errors::ErrorCode;
+use crate::events::ProveThresholdEvent;
 
 #[queue_computation_accounts("prove_threshold", payer)]
 #[derive(Accounts)]
@@ -77,4 +79,58 @@ pub struct InitProveThresholdCompDef<'info> {
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
+}
+
+pub fn handler(
+    ctx: Context<ProveThreshold>,
+    computation_offset: u64,
+    ciphertext_balance: [u8; 32],
+    ciphertext_threshold: [u8; 32],
+    pubkey: [u8; 32],
+    nonce: u128,
+) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+    let args = ArgBuilder::new()
+        .x25519_pubkey(pubkey)
+        .plaintext_u128(nonce)
+        .encrypted_u64(ciphertext_balance)
+        .encrypted_u64(ciphertext_threshold)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![ProveThresholdCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn callback(
+    ctx: Context<ProveThresholdCallback>,
+    output: SignedComputationOutputs<ProveThresholdOutput>,
+) -> Result<()> {
+    // `prove_threshold` returns a REVEALED bool → field_0 is the value itself.
+    let meets = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(ProveThresholdOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    emit!(ProveThresholdEvent {
+        meets_threshold: meets,
+    });
+    Ok(())
 }

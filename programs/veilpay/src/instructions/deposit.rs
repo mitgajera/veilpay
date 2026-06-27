@@ -3,6 +3,8 @@ use arcium_anchor::prelude::*;
 
 use crate::{ArciumSignerAccount, ID, ID_CONST};
 use crate::constants::COMP_DEF_OFFSET_DEPOSIT;
+use crate::errors::ErrorCode;
+use crate::events::DepositEvent;
 
 #[queue_computation_accounts("deposit", payer)]
 #[derive(Accounts)]
@@ -77,4 +79,59 @@ pub struct InitDepositCompDef<'info> {
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
+}
+
+/// Queue a confidential deposit (`balance + amount`) to the MPC cluster.
+pub fn handler(
+    ctx: Context<Deposit>,
+    computation_offset: u64,
+    ciphertext_balance: [u8; 32],
+    ciphertext_amount: [u8; 32],
+    pubkey: [u8; 32],
+    nonce: u128,
+) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+    let args = ArgBuilder::new()
+        .x25519_pubkey(pubkey)
+        .plaintext_u128(nonce)
+        .encrypted_u64(ciphertext_balance)
+        .encrypted_u64(ciphertext_amount)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![DepositCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn callback(
+    ctx: Context<DepositCallback>,
+    output: SignedComputationOutputs<DepositOutput>,
+) -> Result<()> {
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(DepositOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    emit!(DepositEvent {
+        new_balance: o.ciphertexts[0],
+        nonce: o.nonce.to_le_bytes(),
+    });
+    Ok(())
 }

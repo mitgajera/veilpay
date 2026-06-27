@@ -3,6 +3,8 @@ use arcium_anchor::prelude::*;
 
 use crate::{ArciumSignerAccount, ID, ID_CONST};
 use crate::constants::COMP_DEF_OFFSET_BATCH_TRANSFER;
+use crate::errors::ErrorCode;
+use crate::events::BatchTransferEvent;
 
 #[queue_computation_accounts("batch_transfer", payer)]
 #[derive(Accounts)]
@@ -77,4 +79,72 @@ pub struct InitBatchTransferCompDef<'info> {
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn handler(
+    ctx: Context<BatchTransfer>,
+    computation_offset: u64,
+    ct_sender: [u8; 32],
+    ct_r1: [u8; 32],
+    ct_r2: [u8; 32],
+    ct_r3: [u8; 32],
+    ct_a1: [u8; 32],
+    ct_a2: [u8; 32],
+    ct_a3: [u8; 32],
+    pubkey: [u8; 32],
+    nonce: u128,
+) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+    let args = ArgBuilder::new()
+        .x25519_pubkey(pubkey)
+        .plaintext_u128(nonce)
+        .encrypted_u64(ct_sender)
+        .encrypted_u64(ct_r1)
+        .encrypted_u64(ct_r2)
+        .encrypted_u64(ct_r3)
+        .encrypted_u64(ct_a1)
+        .encrypted_u64(ct_a2)
+        .encrypted_u64(ct_a3)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        vec![BatchTransferCallback::callback_ix(
+            computation_offset,
+            &ctx.accounts.mxe_account,
+            &[],
+        )?],
+        1,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+pub fn callback(
+    ctx: Context<BatchTransferCallback>,
+    output: SignedComputationOutputs<BatchTransferOutput>,
+) -> Result<()> {
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(BatchTransferOutput { field_0 }) => field_0,
+        Err(e) => {
+            msg!("Computation aborted, no valid MPC output: {}", e);
+            return Err(ErrorCode::AbortedComputation.into());
+        }
+    };
+
+    emit!(BatchTransferEvent {
+        new_sender: o.ciphertexts[0],
+        new_r1: o.ciphertexts[1],
+        new_r2: o.ciphertexts[2],
+        new_r3: o.ciphertexts[3],
+        nonce: o.nonce.to_le_bytes(),
+    });
+    Ok(())
 }
