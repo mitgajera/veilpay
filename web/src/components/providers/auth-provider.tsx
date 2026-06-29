@@ -18,6 +18,16 @@ type AuthContextValue = {
 
 const AuthContext = React.createContext<AuthContextValue | null>(null);
 
+/** Wallet adapters throw a rejection (name WalletSignMessageError, EIP-1193 code 4001,
+ *  or a "user rejected" message) when the user dismisses the popup. That's a cancel, not an error. */
+function isUserRejection(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { name?: string; code?: number; message?: string };
+  if (err.code === 4001) return true;
+  if (err.name === "WalletSignMessageError" || err.name === "WalletSignTransactionError") return true;
+  return /reject|cancel|denied|declined/i.test(err.message ?? "");
+}
+
 export function useAuth() {
   const ctx = React.useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within <AuthProvider>");
@@ -78,6 +88,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await refresh();
       toast.success("Signed in", "Welcome to VeilPay");
     } catch (e) {
+      // A user dismissing the wallet popup is a choice, not a failure — stay quiet.
+      if (isUserRejection(e)) return;
       toast.error("Sign-in failed", e instanceof Error ? e.message : undefined);
     } finally {
       setSigningIn(false);

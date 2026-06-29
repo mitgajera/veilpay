@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { ArrowDownLeft, ArrowUpRight, Lock } from "lucide-react";
+import Link from "next/link";
+import { ArrowDownLeft, ArrowUpRight, ArrowRight, Lock } from "lucide-react";
 import { BalanceCard } from "@/components/balance-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/fetcher";
@@ -39,7 +40,15 @@ export default function DashboardPage() {
 
       <section>
         <div className="mb-3 flex items-center justify-between">
-          <p className="label-caps">Activity</p>
+          <p className="label-caps">Recent activity</p>
+          {activity && activity.length > 0 && (
+            <Link
+              href="/app/activity"
+              className="inline-flex items-center gap-1 text-xs text-text-muted transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+            >
+              View all <ArrowRight className="h-3 w-3" />
+            </Link>
+          )}
         </div>
 
         {activity === null ? (
@@ -57,7 +66,7 @@ export default function DashboardPage() {
           </div>
         ) : (
           <ul>
-            {activity.map((t) => {
+            {activity.slice(0, 6).map((t) => {
               const inbound = t.kind === "deposit";
               return (
                 <li
